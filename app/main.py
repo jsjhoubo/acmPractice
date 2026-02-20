@@ -10,14 +10,13 @@ def main():
     while True:
         connection, _ = server_socket.accept()
         with connection:
-            data = connection.recv(1024)
-            if not data:
-                continue
+            while True:
+                data = connection.recv(1024)
+                if not data:
+                    break
 
-            if data == b"PING\r\n" or data == b"*1\r\n$4\r\nPING\r\n":
-                connection.sendall(b"+PONG\r\n")
-                continue
-
+                if data == b"PING\r\n" or data == b"*1\r\n$4\r\nPING\r\n":
+                    connection.sendall(b"+PONG\r\n")
         connection.close()
 
 
