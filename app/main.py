@@ -9,6 +9,15 @@ def main():
 
     while True:
         connection, _ = server_socket.accept()
+        with connection:
+            data = connection.recv(1024)
+            if not data:
+                continue
+
+            if data == b"PING\r\n" or data == b"*1\r\n$4\r\nPING\r\n":
+                connection.sendall(b"+PONG\r\n")
+                continue
+
         connection.close()
 
 
