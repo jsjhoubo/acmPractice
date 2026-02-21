@@ -12,6 +12,9 @@ def handle_client(client_socket, client_address):
                 
                 if data == b"PING\r\n" or data == b"*1\r\n$4\r\nPING\r\n":
                     client_socket.sendall(b"+PONG\r\n")
+                elif data.startswith(b"*2\r\n$4\r\nECHO\r\n"):
+                    message = data[14:]
+                    client_socket.sendall(message)
     except ConnectionResetError:
         print(f"客户端 {client_address} 异常断开")
     except Exception as e:
