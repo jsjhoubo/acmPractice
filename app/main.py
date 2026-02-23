@@ -1,7 +1,9 @@
 import socket  # noqa: F401
 import threading  # noqa: F401
+from datetime import datetime, timedelta
 
 thread_lock = threading.Lock()
+
 def process_command(command: str) -> str:
     i =0
     command_token =[]
@@ -61,14 +63,30 @@ def handle_client(client_socket, client_address):
                         response = f"${len(commands[1])}\r\n{commands[1]}\r\n"
                         client_socket.sendall(response.encode())
                 elif commands[0] == "SET":
-                    if len(commands) != 3:
-                        client_socket.sendall(b"-ERR wrong number of arguments for 'set' command\r\n")
-                    else:
+                    if len(commands) == 3:
                         key = commands[1]
                         value = commands[2]
                         with thread_lock:
                             storage[key] = value
                         client_socket.sendall(b"+OK\r\n")
+                    elif len(commands) == 5 and (commands[3].upper() == "EX" or commands[3].upper() == "PX"):
+                        key = commands[1]
+                        value = commands[2]
+                        try:
+                            expire_time = int(commands[4])
+                            if commands[3].upper() == "EX":
+                                expire_time = datetime.now() + timedelta(seconds=expire_time)
+                            elif commands[3].upper() == "PX":
+                                expire_time = datetime.now() + timedelta(milliseconds=expire_time)
+                            with thread_lock:
+                                storage[key] = value
+                                # Here you would normally set the expiration time
+                                expire_times[key] = expire_time
+                            client_socket.sendall(b"+OK\r\n")
+                        except ValueError:
+                            client_socket.sendall(b"-ERR invalid expire time\r\n")
+                    else:
+                        client_socket.sendall(b"-ERR wrong number of arguments for 'set' command\r\n")
                 elif commands[0] == "GET":
                     if len(commands) != 2:
                         client_socket.sendall(b"-ERR wrong number of arguments for 'get' command\r\n")
@@ -76,6 +94,12 @@ def handle_client(client_socket, client_address):
                         key = commands[1]
                         with thread_lock:
                             value = storage.get(key)
+                            expire_time =expire_times.get(key)
+                        if expire_time and datetime.now() > expire_time:
+                            with thread_lock:
+                                del storage[key]
+                                del expire_times[key]
+                            value = None
                         if value is None:
                             client_socket.sendall(b"$-1\r\n")
                         else:
@@ -91,6 +115,8 @@ def handle_client(client_socket, client_address):
 def main():
     global storage
     storage = {}
+    global expire_times
+    expire_times = {}
     # You can use print statements as follows for debugging, they'll be visible when running tests.
     print("Logs from your program will appear here!")
 
