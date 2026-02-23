@@ -128,6 +128,23 @@ def handle_client(commands):
             for value in commands[2:]:
                 storage[key].append(value)
             response = f":{len(storage[key])}\r\n".encode()
+        elif commands[0] == "LRANGE":
+            key = commands[1]
+            if key not in storage or not isinstance(storage[key], list):
+                response = b"*0\r\n"
+            else:
+                try:
+                    start = int(commands[2])
+                    end = int(commands[3])
+                    if end < 0:
+                        end += len(storage[key])
+                    end += 1
+                    items = storage[key][start:end]
+                    response = f"*{len(items)}\r\n".encode()
+                    for item in items:
+                        response += f"${len(item)}\r\n{item}\r\n".encode()
+                except ValueError:
+                    response = b"-ERR invalid range\r\n"
     except Exception as e:
         response = f"-ERR {e}\r\n".encode()
 
