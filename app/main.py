@@ -155,6 +155,12 @@ def handle_client(commands):
                         response += f"${len(item)}\r\n{item}\r\n".encode()
                 except ValueError:
                     response = b"-ERR invalid range\r\n"
+        elif commands[0] == "LLEN":
+            key = commands[1]
+            if key not in storage or not isinstance(storage[key], list):
+                response = b":0\r\n"
+            else:
+                response = f":{len(storage[key])}\r\n".encode()
     except Exception as e:
         response = f"-ERR {e}\r\n".encode()
 
