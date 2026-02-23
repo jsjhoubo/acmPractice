@@ -161,6 +161,13 @@ def handle_client(commands):
                 response = b":0\r\n"
             else:
                 response = f":{len(storage[key])}\r\n".encode()
+        elif commands[0] == "LPOP":
+            key = commands[1]
+            if key not in storage or not isinstance(storage[key], list) or not storage[key]:
+                response = b"$-1\r\n"
+            else:
+                value = storage[key].pop(0)
+                response = f"${len(value)}\r\n{value}\r\n".encode()
     except Exception as e:
         response = f"-ERR {e}\r\n".encode()
 
