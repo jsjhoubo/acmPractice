@@ -128,6 +128,16 @@ def handle_client(commands):
             for value in commands[2:]:
                 storage[key].append(value)
             response = f":{len(storage[key])}\r\n".encode()
+        elif commands[0] == "LPUSH":
+            key = commands[1]
+            if key not in storage:
+                storage[key] = []
+            elif not isinstance(storage[key], list):
+                response = b"-ERR wrong type of value for 'lpush' command\r\n"
+                return response
+            for value in commands[2:]:
+                storage[key].insert(0, value)
+            response = f":{len(storage[key])}\r\n".encode()
         elif commands[0] == "LRANGE":
             key = commands[1]
             if key not in storage or not isinstance(storage[key], list):
