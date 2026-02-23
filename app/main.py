@@ -119,18 +119,15 @@ def handle_client(commands):
                 else:
                     response = f"${len(value)}\r\n{value}\r\n".encode()
         elif commands[0] == "RPUSH":
-            if len(commands) != 3:
-                response = b"-ERR wrong number of arguments for 'rpush' command\r\n"
-            else:
-                key = commands[1]
-                value = commands[2]
-                if key not in storage:
-                    storage[key] = []
-                elif not isinstance(storage[key], list):
-                    response = b"-ERR wrong type of value for 'rpush' command\r\n"
-                    return response
+            key = commands[1]        
+            if key not in storage:
+                storage[key] = []
+            elif not isinstance(storage[key], list):
+                response = b"-ERR wrong type of value for 'rpush' command\r\n"
+                return response
+            for value in commands[2:]:
                 storage[key].append(value)
-                response = f":{len(storage[key])}\r\n".encode()
+            response = f":{len(storage[key])}\r\n".encode()
     except Exception as e:
         response = f"-ERR {e}\r\n".encode()
 
