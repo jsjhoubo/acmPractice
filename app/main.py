@@ -330,6 +330,29 @@ def handle_client(commands, client_socket=None):
 
             storage[key].entries.append((entry_id, fields))
             response = f"${len(entry_id)}\r\n{entry_id}\r\n".encode()
+        elif commands[0] == "XRANGE":
+            key = commands[1]
+            if key not in storage or not isinstance(storage[key], RedisStream):
+                response = b"*0\r\n"
+            else:
+                start_id = commands[2]
+                end_id = commands[3]
+
+                entries = storage[key].entries
+                matching_entries = []
+                for entry_id, fields in entries:
+                    if (start_id == "-" or entry_id >= start_id) and (end_id == "+" or entry_id <= end_id):
+                        matching_entries.append((entry_id, fields))
+
+                response = f"*{len(matching_entries)}\r\n".encode()
+                for entry_id, fields in matching_entries:
+                    response += f"*2\r\n${len(entry_id)}\r\n{entry_id}\r\n".encode()
+                    response += f"*{len(fields) // 2}\r\n".encode()
+                    for i in range(0, len(fields), 2):
+                        field_name = fields[i]
+                        field_value = fields[i + 1]
+                        response += f"${len(field_name)}\r\n{field_name}\r\n".encode()
+                        response += f"${len(field_value)}\r\n{field_value}\r\n".encode()
     except Exception as e:
         response = f"-ERR {e}\r\n".encode()
 
