@@ -11,6 +11,18 @@ class RedisStream:
     def __init__(self):
         self.entries = []
 
+
+def parse_stream_id(entry_id: str):
+    parts = entry_id.split("-")
+    if len(parts) != 2:
+        return None
+
+    milliseconds, sequence = parts
+    if not milliseconds.isdigit() or not sequence.isdigit():
+        return None
+
+    return int(milliseconds), int(sequence)
+
 def _find_crlf(data: bytes, start: int) -> int:
     return data.find(b"\r\n", start)
 
@@ -270,8 +282,32 @@ def handle_client(commands, client_socket=None):
                 response = b"-ERR wrong type of value for 'xadd' command\r\n"
                 return response
 
+            last_id_tuple = (0, 0)
+            if storage[key].entries:
+                last_id = storage[key].entries[-1][0]
+                parsed_last_id = parse_stream_id(last_id)
+                if parsed_last_id is not None:
+                    last_id_tuple = parsed_last_id
+
             if entry_id == "*":
-                entry_id = f"{int(datetime.now().timestamp() * 1000)}-0"
+                current_milliseconds = int(datetime.now().timestamp() * 1000)
+                if current_milliseconds > last_id_tuple[0]:
+                    entry_id = f"{current_milliseconds}-0"
+                else:
+                    entry_id = f"{last_id_tuple[0]}-{last_id_tuple[1] + 1}"
+            else:
+                parsed_entry_id = parse_stream_id(entry_id)
+                if parsed_entry_id is None:
+                    response = b"-ERR Invalid stream ID specified as stream command argument\r\n"
+                    return response
+
+                if parsed_entry_id == (0, 0):
+                    response = b"-ERR The ID specified in XADD must be greater than 0-0\r\n"
+                    return response
+
+                if parsed_entry_id <= last_id_tuple:
+                    response = b"-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n"
+                    return response
 
             storage[key].entries.append((entry_id, fields))
             response = f"${len(entry_id)}\r\n{entry_id}\r\n".encode()
