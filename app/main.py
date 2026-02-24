@@ -68,14 +68,17 @@ def parse_resp_from_buffer(buffer: bytes):
     return items, buffer[index:]
 
 
-def wake_blocked_clients_for_key(key: str):
+def wake_blocked_clients_for_key(key: str, max_wake_count: int):
     if key not in blocked_clients_by_key:
         return
     if key not in storage or not isinstance(storage[key], list):
         return
+    if max_wake_count <= 0:
+        return
 
     waiting_clients = blocked_clients_by_key[key]
-    while waiting_clients and storage[key]:
+    remaining_wake_count = max_wake_count
+    while waiting_clients and storage[key] and remaining_wake_count > 0:
         client = waiting_clients.pop(0)
         if client not in send_queue:
             blocked_client_deadline.pop(client, None)
@@ -88,6 +91,7 @@ def wake_blocked_clients_for_key(key: str):
         blocked_client_deadline.pop(client, None)
         if client not in outputs:
             outputs.append(client)
+        remaining_wake_count -= 1
 
     if not waiting_clients:
         blocked_clients_by_key.pop(key, None)
@@ -149,8 +153,9 @@ def handle_client(commands, client_socket=None):
                 return response
             for value in commands[2:]:
                 storage[key].append(value)
-            wake_blocked_clients_for_key(key)
-            response = f":{len(storage[key])}\r\n".encode()
+            pushed_length = len(storage[key])
+            wake_blocked_clients_for_key(key, len(commands) - 2)
+            response = f":{pushed_length}\r\n".encode()
         elif commands[0] == "LPUSH":
             key = commands[1]
             if key not in storage:
@@ -160,8 +165,9 @@ def handle_client(commands, client_socket=None):
                 return response
             for value in commands[2:]:
                 storage[key].insert(0, value)
-            wake_blocked_clients_for_key(key)
-            response = f":{len(storage[key])}\r\n".encode()
+            pushed_length = len(storage[key])
+            wake_blocked_clients_for_key(key, len(commands) - 2)
+            response = f":{pushed_length}\r\n".encode()
         elif commands[0] == "LRANGE":
             key = commands[1]
             if key not in storage or not isinstance(storage[key], list):
