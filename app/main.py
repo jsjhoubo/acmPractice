@@ -354,17 +354,16 @@ def handle_client(commands, client_socket=None):
                         response += f"${len(field_name)}\r\n{field_name}\r\n".encode()
                         response += f"${len(field_value)}\r\n{field_value}\r\n".encode()
         elif commands[0] == "XREAD":
-            if len(commands) < 4 or (len(commands) - 2) % 2 != 0:
+            if len(commands) < 4:
                 response = b"-ERR wrong number of arguments for 'xread' command\r\n"
                 return response
 
             count = None
-            block = None
             index = 1
-            while index < len(commands) - 2:
+            while index < len(commands):
                 option = commands[index].upper()
                 if option == "COUNT":
-                    if index + 1 >= len(commands) - 2:
+                    if index + 1 >= len(commands):
                         response = b"-ERR missing COUNT argument for 'xread' command\r\n"
                         return response
                     try:
@@ -374,41 +373,76 @@ def handle_client(commands, client_socket=None):
                         return response
                     index += 2
                 elif option == "BLOCK":
-                    if index + 1 >= len(commands) - 2:
+                    if index + 1 >= len(commands):
                         response = b"-ERR missing BLOCK argument for 'xread' command\r\n"
                         return response
                     try:
-                        block = float(commands[index + 1])
+                        float(commands[index + 1])
                     except ValueError:
                         response = b"-ERR invalid BLOCK argument for 'xread' command\r\n"
                         return response
                     index += 2
-                else:
+                elif option == "STREAMS":
+                    index += 1
                     break
+                else:
+                    response = b"-ERR syntax error\r\n"
+                    return response
+
+            if index >= len(commands):
+                response = b"-ERR wrong number of arguments for 'xread' command\r\n"
+                return response
 
             stream_keys_and_ids = commands[index:]
             if len(stream_keys_and_ids) % 2 != 0:
                 response = b"-ERR invalid stream and ID pairs for 'xread' command\r\n"
                 return response
 
-            streams_to_read = []
-            for i in range(0, len(stream_keys_and_ids), 2):
-                stream_key = stream_keys_and_ids[i]
-                last_id = stream_keys_and_ids[i + 1]
-                streams_to_read.append((stream_key, last_id))
+            half = len(stream_keys_and_ids) // 2
+            stream_keys = stream_keys_and_ids[:half]
+            last_ids = stream_keys_and_ids[half:]
+            streams_to_read = list(zip(stream_keys, last_ids))
 
             result_streams = []
             for stream_key, last_id in streams_to_read:
                 if stream_key not in storage or not isinstance(storage[stream_key], RedisStream):
                     continue
 
-                entries = storage[stream_key].entries
+                if last_id == "$":
+                    continue
+
+                if last_id == "0":
+                    last_id_tuple = (0, 0)
+                else:
+                    last_id_tuple = parse_stream_id(last_id)
+                    if last_id_tuple is None:
+                        response = b"-ERR Invalid stream ID specified as stream command argument\r\n"
+                        return response
+
                 matching_entries = []
-                for entry_id, fields in entries:
-                    if last_id == "$":
-                        continue
-                    if last_id == "0" or entry_id > last_id:
+                for entry_id, fields in storage[stream_key].entries:
+                    parsed_entry_id = parse_stream_id(entry_id)
+                    if parsed_entry_id is not None and parsed_entry_id > last_id_tuple:
                         matching_entries.append((entry_id, fields))
+
+                if count is not None and count >= 0:
+                    matching_entries = matching_entries[:count]
+
+                if matching_entries:
+                    result_streams.append((stream_key, matching_entries))
+
+            if not result_streams:
+                response = b"*-1\r\n"
+            else:
+                response = f"*{len(result_streams)}\r\n".encode()
+                for stream_key, matching_entries in result_streams:
+                    response += f"*2\r\n${len(stream_key)}\r\n{stream_key}\r\n".encode()
+                    response += f"*{len(matching_entries)}\r\n".encode()
+                    for entry_id, fields in matching_entries:
+                        response += f"*2\r\n${len(entry_id)}\r\n{entry_id}\r\n".encode()
+                        response += f"*{len(fields)}\r\n".encode()
+                        for field in fields:
+                            response += f"${len(field)}\r\n{field}\r\n".encode()
     except Exception as e:
         response = f"-ERR {e}\r\n".encode()
 
