@@ -68,7 +68,7 @@ def parse_resp_from_buffer(buffer: bytes):
     return items, buffer[index:]
 
 
-def handle_client(commands):
+def handle_client(commands, client_socket=None):
     response = b""
     try:
         if not commands:
@@ -90,17 +90,14 @@ def handle_client(commands):
             elif len(commands) == 5 and (commands[3].upper() == "EX" or commands[3].upper() == "PX"):
                 key = commands[1]
                 value = commands[2]
-                try:
-                    expire_time = int(commands[4])
-                    if commands[3].upper() == "EX":
-                        expire_time = datetime.now() + timedelta(seconds=expire_time)
-                    elif commands[3].upper() == "PX":
-                        expire_time = datetime.now() + timedelta(milliseconds=expire_time)
-                    storage[key] = value
-                    expire_times[key] = expire_time
-                    response = b"+OK\r\n"
-                except ValueError:
-                    response = b"-ERR invalid expire time\r\n"
+                timeout_value = int(commands[4])
+                storage[key] = value
+                if commands[3].upper() == "EX":
+                    expire_time = datetime.now() + timedelta(seconds=timeout_value)
+                elif commands[3].upper() == "PX":
+                    expire_time = datetime.now() + timedelta(milliseconds=timeout_value)
+                expire_times[key] = expire_time
+                response = b"+OK\r\n"
             else:
                 response = b"-ERR wrong number of arguments for 'set' command\r\n"
         elif commands[0] == "GET":
@@ -119,7 +116,18 @@ def handle_client(commands):
                 else:
                     response = f"${len(value)}\r\n{value}\r\n".encode()
         elif commands[0] == "RPUSH":
-            key = commands[1]        
+            key = commands[1]    
+            if key in blocked_clients_by_key and isinstance(storage.get(key), list) and storage[key]:
+                value = commands[2]
+                if len(blocked_clients_by_key[key]) > 0:
+                    client = blocked_clients_by_key[key].pop(0)
+                    send_queue[client].append(
+                        f"*2\r\n${len(key)}\r\n{key}\r\n${len(value)}\r\n{value}\r\n".encode()
+                    )
+                    if client not in outputs:
+                        outputs.append(client)
+                if len(blocked_clients_by_key[key]) == 0:
+                    blocked_clients_by_key.remove(key) 
             if key not in storage:
                 storage[key] = []
             elif not isinstance(storage[key], list):
@@ -130,6 +138,17 @@ def handle_client(commands):
             response = f":{len(storage[key])}\r\n".encode()
         elif commands[0] == "LPUSH":
             key = commands[1]
+            if key in blocked_clients_by_key and isinstance(storage.get(key), list) and storage[key]:
+                value = commands[2]
+                if len( blocked_clients_by_key[key])>0:
+                    client = blocked_clients_by_key[key].pop(0)
+                    send_queue[client].append(
+                        f"*2\r\n${len(key)}\r\n{key}\r\n${len(value)}\r\n{value}\r\n".encode()
+                    )
+                    if client not in outputs:
+                        outputs.append(client)
+                if len (blocked_clients_by_key[key]) == 0:
+                    blocked_clients_by_key.remove(key)
             if key not in storage:
                 storage[key] = []
             elif not isinstance(storage[key], list):
@@ -181,6 +200,31 @@ def handle_client(commands):
             else:
                 value = storage[key].pop(0)
                 response = f"${len(value)}\r\n{value}\r\n".encode()
+        elif commands[0] == "BLPOP":
+            key = commands[1]
+            timeout = 0
+            if len(commands) == 3:
+                try:
+                    timeout = int(commands[2])
+                except ValueError:
+                    response = b"-ERR invalid timeout\r\n"
+                    return response
+
+            if key in storage and isinstance(storage[key], list) and storage[key]:
+                value = storage[key].pop(0)
+                response = (
+                    f"*2\r\n"
+                    f"${len(key)}\r\n{key}\r\n"
+                    f"${len(value)}\r\n{value}\r\n"
+                ).encode()
+            else:
+                end_time = datetime.now() + timedelta(seconds=timeout)
+                if blocked_clients_by_key.get(key) is None:
+                    blocked_clients_by_key[key] = []
+                blocked_clients_by_key[key].append(client_socket)
+                if timeout > 0:
+                    blocked_client_deadline[client_socket] = end_time
+                return None
     except Exception as e:
         response = f"-ERR {e}\r\n".encode()
 
@@ -201,6 +245,10 @@ def main():
     storage = {}
     global expire_times
     expire_times = {}
+    global blocked_clients_by_key
+    blocked_clients_by_key = {}
+    global blocked_client_deadline
+    blocked_client_deadline = {}
     # You can use print statements as follows for debugging, they'll be visible when running tests.
     print("Logs from your program will appear here!")
     
@@ -210,17 +258,28 @@ def main():
     server_socket.listen(socket_queue_size)
 
     inputs = [server_socket]
+    global outputs
     outputs = []
     recv_buffer = {}
+    global send_queue
     send_queue = {}
 
     try:
         while True:
             readable, writable, exceptional = select.select(
                 inputs, outputs, inputs, socket_timeout)
+            for key, deadline in list(blocked_client_deadline.items()):
+                if key in send_queue and datetime.now() >= deadline:
+                    send_queue[key].append(b"*-1\r\n")
+                    if key not in outputs:
+                        outputs.append(key)
+                    blocked_client_deadline.pop(key, None)
+                    for clients in blocked_clients_by_key.values():
+                        if key in clients:
+                            clients.remove(key)
             for s in readable:
                 if s is server_socket:
-                    client_socket, client_address = server_socket.accept()
+                    client_socket, _ = server_socket.accept()
                     client_socket.setblocking(False)
                     inputs.append(client_socket)
                     recv_buffer[client_socket] = b""
@@ -238,10 +297,11 @@ def main():
                                     break
 
                                 recv_buffer[s] = remaining
-                                response = handle_client(commands)
-                                send_queue[s].append(response)
-                                if s not in outputs:
-                                    outputs.append(s)
+                                response = handle_client(commands, client_socket=s)
+                                if response is not None:
+                                    send_queue[s].append(response)
+                                    if s not in outputs:
+                                        outputs.append(s)
                         except ValueError as e:
                             send_queue[s].append(f"-ERR {e}\r\n".encode())
                             recv_buffer[s] = b""
