@@ -241,7 +241,11 @@ def handle_client(commands, client_socket=None):
             if key not in storage:
                 response = b"+none\r\n"
             else:
-                value_type = type(storage[key]).__name__
+                python_type = type(storage[key]).__name__
+                if python_type == "str":
+                    value_type = "string"
+                else:
+                    value_type = python_type
                 response = f"+{value_type}\r\n".encode()
     except Exception as e:
         response = f"-ERR {e}\r\n".encode()
