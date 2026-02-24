@@ -347,7 +347,7 @@ def handle_client(commands, client_socket=None):
                 response = f"*{len(matching_entries)}\r\n".encode()
                 for entry_id, fields in matching_entries:
                     response += f"*2\r\n${len(entry_id)}\r\n{entry_id}\r\n".encode()
-                    response += f"*{len(fields) // 2}\r\n".encode()
+                    response += f"*{len(fields)}\r\n".encode()
                     for i in range(0, len(fields), 2):
                         field_name = fields[i]
                         field_value = fields[i + 1]
