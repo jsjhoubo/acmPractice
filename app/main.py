@@ -12,6 +12,15 @@ class RedisStream:
         self.entries = []
 
 
+class BlockedXReadRequest:
+    def __init__(self, client_socket, resolved_streams, count, deadline):
+        self.client_socket = client_socket
+        self.resolved_streams = resolved_streams
+        self.count = count
+        self.deadline = deadline
+        self.stream_keys = {stream_key for stream_key, _ in resolved_streams}
+
+
 def parse_stream_id(entry_id: str):
     parts = entry_id.split("-")
     if len(parts) != 2:
@@ -22,6 +31,92 @@ def parse_stream_id(entry_id: str):
         return None
 
     return int(milliseconds), int(sequence)
+
+
+def resolve_xread_stream_offsets(streams_to_read, resolve_dollar_to_latest):
+    resolved_streams = []
+    for stream_key, last_id in streams_to_read:
+        if last_id == "$":
+            if resolve_dollar_to_latest:
+                if stream_key in storage and isinstance(storage[stream_key], RedisStream) and storage[stream_key].entries:
+                    latest_entry_id = storage[stream_key].entries[-1][0]
+                    latest_entry_tuple = parse_stream_id(latest_entry_id)
+                    if latest_entry_tuple is None:
+                        return None, b"-ERR Invalid stream ID specified as stream command argument\r\n"
+                    resolved_streams.append((stream_key, latest_entry_tuple))
+                else:
+                    resolved_streams.append((stream_key, (0, 0)))
+            else:
+                resolved_streams.append((stream_key, None))
+        elif last_id == "0":
+            resolved_streams.append((stream_key, (0, 0)))
+        else:
+            parsed_last_id = parse_stream_id(last_id)
+            if parsed_last_id is None:
+                return None, b"-ERR Invalid stream ID specified as stream command argument\r\n"
+            resolved_streams.append((stream_key, parsed_last_id))
+
+    return resolved_streams, None
+
+
+def collect_xread_matching_entries(resolved_streams, count):
+    result_streams = []
+    for stream_key, last_id_tuple in resolved_streams:
+        if stream_key not in storage or not isinstance(storage[stream_key], RedisStream):
+            continue
+
+        if last_id_tuple is None:
+            continue
+
+        matching_entries = []
+        for entry_id, fields in storage[stream_key].entries:
+            parsed_entry_id = parse_stream_id(entry_id)
+            if parsed_entry_id is not None and parsed_entry_id > last_id_tuple:
+                matching_entries.append((entry_id, fields))
+
+        if count is not None and count >= 0:
+            matching_entries = matching_entries[:count]
+
+        if matching_entries:
+            result_streams.append((stream_key, matching_entries))
+
+    return result_streams
+
+
+def encode_xread_response(result_streams):
+    response = f"*{len(result_streams)}\r\n".encode()
+    for stream_key, matching_entries in result_streams:
+        response += f"*2\r\n${len(stream_key)}\r\n{stream_key}\r\n".encode()
+        response += f"*{len(matching_entries)}\r\n".encode()
+        for entry_id, fields in matching_entries:
+            response += f"*2\r\n${len(entry_id)}\r\n{entry_id}\r\n".encode()
+            response += f"*{len(fields)}\r\n".encode()
+            for field in fields:
+                response += f"${len(field)}\r\n{field}\r\n".encode()
+    return response
+
+
+def wake_blocked_xread_clients_for_stream(stream_key: str):
+    for request in list(blocked_xread_requests):
+        if stream_key not in request.stream_keys:
+            continue
+
+        client = request.client_socket
+        if client not in send_queue:
+            blocked_xread_requests.remove(request)
+            continue
+
+        result_streams = collect_xread_matching_entries(
+            request.resolved_streams,
+            request.count,
+        )
+        if not result_streams:
+            continue
+
+        send_queue[client].append(encode_xread_response(result_streams))
+        if client not in outputs:
+            outputs.append(client)
+        blocked_xread_requests.remove(request)
 
 def _find_crlf(data: bytes, start: int) -> int:
     return data.find(b"\r\n", start)
@@ -329,6 +424,7 @@ def handle_client(commands, client_socket=None):
                     return response
 
             storage[key].entries.append((entry_id, fields))
+            wake_blocked_xread_clients_for_stream(key)
             response = f"${len(entry_id)}\r\n{entry_id}\r\n".encode()
         elif commands[0] == "XRANGE":
             key = commands[1]
@@ -359,6 +455,7 @@ def handle_client(commands, client_socket=None):
                 return response
 
             count = None
+            block_milliseconds = None
             index = 1
             while index < len(commands):
                 option = commands[index].upper()
@@ -371,13 +468,19 @@ def handle_client(commands, client_socket=None):
                     except ValueError:
                         response = b"-ERR invalid COUNT argument for 'xread' command\r\n"
                         return response
+                    if count < 0:
+                        response = b"-ERR invalid COUNT argument for 'xread' command\r\n"
+                        return response
                     index += 2
                 elif option == "BLOCK":
                     if index + 1 >= len(commands):
                         response = b"-ERR missing BLOCK argument for 'xread' command\r\n"
                         return response
                     try:
-                        float(commands[index + 1])
+                        block_milliseconds = int(commands[index + 1])
+                        if block_milliseconds < 0:
+                            response = b"-ERR invalid BLOCK argument for 'xread' command\r\n"
+                            return response
                     except ValueError:
                         response = b"-ERR invalid BLOCK argument for 'xread' command\r\n"
                         return response
@@ -403,46 +506,37 @@ def handle_client(commands, client_socket=None):
             last_ids = stream_keys_and_ids[half:]
             streams_to_read = list(zip(stream_keys, last_ids))
 
-            result_streams = []
-            for stream_key, last_id in streams_to_read:
-                if stream_key not in storage or not isinstance(storage[stream_key], RedisStream):
-                    continue
+            should_block = block_milliseconds is not None
+            resolved_streams, resolve_error = resolve_xread_stream_offsets(
+                streams_to_read,
+                resolve_dollar_to_latest=should_block,
+            )
+            if resolve_error is not None:
+                response = resolve_error
+                return response
 
-                if last_id == "$":
-                    continue
+            result_streams = collect_xread_matching_entries(resolved_streams, count)
 
-                if last_id == "0":
-                    last_id_tuple = (0, 0)
-                else:
-                    last_id_tuple = parse_stream_id(last_id)
-                    if last_id_tuple is None:
-                        response = b"-ERR Invalid stream ID specified as stream command argument\r\n"
-                        return response
+            if result_streams:
+                response = encode_xread_response(result_streams)
+                return response
 
-                matching_entries = []
-                for entry_id, fields in storage[stream_key].entries:
-                    parsed_entry_id = parse_stream_id(entry_id)
-                    if parsed_entry_id is not None and parsed_entry_id > last_id_tuple:
-                        matching_entries.append((entry_id, fields))
+            if should_block:
+                deadline = None
+                if block_milliseconds > 0:
+                    deadline = datetime.now() + timedelta(milliseconds=block_milliseconds)
 
-                if count is not None and count >= 0:
-                    matching_entries = matching_entries[:count]
+                blocked_xread_requests.append(
+                    BlockedXReadRequest(
+                        client_socket=client_socket,
+                        resolved_streams=resolved_streams,
+                        count=count,
+                        deadline=deadline,
+                    )
+                )
+                return None
 
-                if matching_entries:
-                    result_streams.append((stream_key, matching_entries))
-
-            if not result_streams:
-                response = b"*-1\r\n"
-            else:
-                response = f"*{len(result_streams)}\r\n".encode()
-                for stream_key, matching_entries in result_streams:
-                    response += f"*2\r\n${len(stream_key)}\r\n{stream_key}\r\n".encode()
-                    response += f"*{len(matching_entries)}\r\n".encode()
-                    for entry_id, fields in matching_entries:
-                        response += f"*2\r\n${len(entry_id)}\r\n{entry_id}\r\n".encode()
-                        response += f"*{len(fields)}\r\n".encode()
-                        for field in fields:
-                            response += f"${len(field)}\r\n{field}\r\n".encode()
+            response = b"*-1\r\n"
     except Exception as e:
         response = f"-ERR {e}\r\n".encode()
 
@@ -450,6 +544,14 @@ def handle_client(commands, client_socket=None):
 
 
 def close_client_socket(s, inputs, outputs, recv_buffer, send_queue):
+    global blocked_xread_requests
+
+    blocked_client_deadline.pop(s, None)
+    for clients in blocked_clients_by_key.values():
+        if s in clients:
+            clients.remove(s)
+    blocked_xread_requests = [req for req in blocked_xread_requests if req.client_socket is not s]
+
     if s in outputs:
         outputs.remove(s)
     if s in inputs:
@@ -467,6 +569,8 @@ def main():
     blocked_clients_by_key = {}
     global blocked_client_deadline
     blocked_client_deadline = {}
+    global blocked_xread_requests
+    blocked_xread_requests = []
     # You can use print statements as follows for debugging, they'll be visible when running tests.
     print("Logs from your program will appear here!")
     
@@ -495,6 +599,16 @@ def main():
                     for clients in blocked_clients_by_key.values():
                         if key in clients:
                             clients.remove(key)
+            for request in list(blocked_xread_requests):
+                client = request.client_socket
+                if client not in send_queue:
+                    blocked_xread_requests.remove(request)
+                    continue
+                if request.deadline is not None and datetime.now() >= request.deadline:
+                    send_queue[client].append(b"*-1\r\n")
+                    if client not in outputs:
+                        outputs.append(client)
+                    blocked_xread_requests.remove(request)
             for s in readable:
                 if s is server_socket:
                     client_socket, _ = server_socket.accept()
