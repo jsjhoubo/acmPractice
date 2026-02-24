@@ -256,7 +256,7 @@ def handle_client(commands, client_socket=None):
                     value_type = python_type
                 response = f"+{value_type}\r\n".encode()
         elif commands[0] == "XADD":
-            if len(commands) < 5 or len(commands[3:]) % 2 != 1:
+            if len(commands) < 5 or len(commands[3:]) % 2 != 0:
                 response = b"-ERR wrong number of arguments for 'xadd' command\r\n"
                 return response
 
