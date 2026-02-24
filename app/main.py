@@ -256,6 +256,25 @@ def handle_client(commands, client_socket=None):
                     response = b"$-1\r\n"
                 else:
                     response = f"${len(value)}\r\n{value}\r\n".encode()
+        elif commands[0] == "INCR":
+            if len(commands) != 2:
+                response = b"-ERR wrong number of arguments for 'incr' command\r\n"
+            else:
+                key = commands[1]
+                value = storage.get(key)
+
+                if value is None:
+                    value = "1"
+                    storage[key] = value
+                    response = b":1\r\n"
+                else:
+                    try:
+                        incremented_value = int(value) + 1
+                    except ValueError:
+                        response = b"-ERR value is not an integer or out of range\r\n"
+                    else:
+                        storage[key] = str(incremented_value)
+                        response = f":{incremented_value}\r\n".encode()
         elif commands[0] == "RPUSH":
             key = commands[1]
             if key not in storage:
