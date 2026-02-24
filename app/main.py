@@ -353,6 +353,62 @@ def handle_client(commands, client_socket=None):
                         field_value = fields[i + 1]
                         response += f"${len(field_name)}\r\n{field_name}\r\n".encode()
                         response += f"${len(field_value)}\r\n{field_value}\r\n".encode()
+        elif commands[0] == "XREAD":
+            if len(commands) < 4 or (len(commands) - 2) % 2 != 0:
+                response = b"-ERR wrong number of arguments for 'xread' command\r\n"
+                return response
+
+            count = None
+            block = None
+            index = 1
+            while index < len(commands) - 2:
+                option = commands[index].upper()
+                if option == "COUNT":
+                    if index + 1 >= len(commands) - 2:
+                        response = b"-ERR missing COUNT argument for 'xread' command\r\n"
+                        return response
+                    try:
+                        count = int(commands[index + 1])
+                    except ValueError:
+                        response = b"-ERR invalid COUNT argument for 'xread' command\r\n"
+                        return response
+                    index += 2
+                elif option == "BLOCK":
+                    if index + 1 >= len(commands) - 2:
+                        response = b"-ERR missing BLOCK argument for 'xread' command\r\n"
+                        return response
+                    try:
+                        block = float(commands[index + 1])
+                    except ValueError:
+                        response = b"-ERR invalid BLOCK argument for 'xread' command\r\n"
+                        return response
+                    index += 2
+                else:
+                    break
+
+            stream_keys_and_ids = commands[index:]
+            if len(stream_keys_and_ids) % 2 != 0:
+                response = b"-ERR invalid stream and ID pairs for 'xread' command\r\n"
+                return response
+
+            streams_to_read = []
+            for i in range(0, len(stream_keys_and_ids), 2):
+                stream_key = stream_keys_and_ids[i]
+                last_id = stream_keys_and_ids[i + 1]
+                streams_to_read.append((stream_key, last_id))
+
+            result_streams = []
+            for stream_key, last_id in streams_to_read:
+                if stream_key not in storage or not isinstance(storage[stream_key], RedisStream):
+                    continue
+
+                entries = storage[stream_key].entries
+                matching_entries = []
+                for entry_id, fields in entries:
+                    if last_id == "$":
+                        continue
+                    if last_id == "0" or entry_id > last_id:
+                        matching_entries.append((entry_id, fields))
     except Exception as e:
         response = f"-ERR {e}\r\n".encode()
 
