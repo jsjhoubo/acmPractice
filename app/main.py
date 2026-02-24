@@ -295,6 +295,25 @@ def handle_client(commands, client_socket=None):
                     entry_id = f"{current_milliseconds}-0"
                 else:
                     entry_id = f"{last_id_tuple[0]}-{last_id_tuple[1] + 1}"
+            elif entry_id.count("-") == 1 and entry_id.endswith("-*"):
+                milliseconds_part = entry_id.split("-")[0]
+                if not milliseconds_part.isdigit():
+                    response = b"-ERR Invalid stream ID specified as stream command argument\r\n"
+                    return response
+
+                milliseconds_value = int(milliseconds_part)
+                if milliseconds_value < last_id_tuple[0]:
+                    response = b"-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n"
+                    return response
+
+                if milliseconds_value == last_id_tuple[0]:
+                    sequence_value = last_id_tuple[1] + 1
+                elif milliseconds_value == 0:
+                    sequence_value = 1
+                else:
+                    sequence_value = 0
+
+                entry_id = f"{milliseconds_value}-{sequence_value}"
             else:
                 parsed_entry_id = parse_stream_id(entry_id)
                 if parsed_entry_id is None:
