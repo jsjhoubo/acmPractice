@@ -6,6 +6,11 @@ socket_queue_size = 128
 socket_receive_buffer_size = 1024
 socket_timeout = 1
 
+
+class RedisStream:
+    def __init__(self):
+        self.entries = []
+
 def _find_crlf(data: bytes, start: int) -> int:
     return data.find(b"\r\n", start)
 
@@ -241,12 +246,35 @@ def handle_client(commands, client_socket=None):
             if key not in storage:
                 response = b"+none\r\n"
             else:
-                python_type = type(storage[key]).__name__
+                value = storage[key]
+                python_type = type(value).__name__
                 if python_type == "str":
                     value_type = "string"
+                elif isinstance(value, RedisStream):
+                    value_type = "stream"
                 else:
                     value_type = python_type
                 response = f"+{value_type}\r\n".encode()
+        elif commands[0] == "XADD":
+            if len(commands) < 5 or len(commands[3:]) % 2 != 1:
+                response = b"-ERR wrong number of arguments for 'xadd' command\r\n"
+                return response
+
+            key = commands[1]
+            entry_id = commands[2]
+            fields = commands[3:]
+
+            if key not in storage:
+                storage[key] = RedisStream()
+            elif not isinstance(storage[key], RedisStream):
+                response = b"-ERR wrong type of value for 'xadd' command\r\n"
+                return response
+
+            if entry_id == "*":
+                entry_id = f"{int(datetime.now().timestamp() * 1000)}-0"
+
+            storage[key].entries.append((entry_id, fields))
+            response = f"${len(entry_id)}\r\n{entry_id}\r\n".encode()
     except Exception as e:
         response = f"-ERR {e}\r\n".encode()
 
