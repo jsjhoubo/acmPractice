@@ -165,6 +165,19 @@ def handle_client(commands):
             key = commands[1]
             if key not in storage or not isinstance(storage[key], list) or not storage[key]:
                 response = b"$-1\r\n"
+            elif len(commands) == 3:
+                try:
+                    count = int(commands[2])
+                    if count <= 0:
+                        response = b"$-1\r\n"
+                    else:
+                        items_to_pop = min(count, len(storage[key]))
+                        values = [storage[key].pop(0) for _ in range(items_to_pop)]
+                        response = f"*{len(values)}\r\n".encode()
+                        for value in values:
+                            response += f"${len(value)}\r\n{value}\r\n".encode()
+                except ValueError:
+                    response = b"-ERR invalid count\r\n"
             else:
                 value = storage[key].pop(0)
                 response = f"${len(value)}\r\n{value}\r\n".encode()
