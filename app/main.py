@@ -236,6 +236,13 @@ def handle_client(commands, client_socket=None):
                 if timeout > 0:
                     blocked_client_deadline[client_socket] = end_time
                 return None
+        elif commands[0] == "TYPE":
+            key = commands[1]
+            if key not in storage:
+                response = b"+none\r\n"
+            else:
+                value_type = type(storage[key]).__name__
+                response = f"${len(value_type)}\r\n{value_type}\r\n".encode()
     except Exception as e:
         response = f"-ERR {e}\r\n".encode()
 
