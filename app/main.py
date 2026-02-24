@@ -242,7 +242,7 @@ def handle_client(commands, client_socket=None):
                 response = b"+none\r\n"
             else:
                 value_type = type(storage[key]).__name__
-                response = f"{value_type}\r\n".encode()
+                response = f"+{value_type}\r\n".encode()
     except Exception as e:
         response = f"-ERR {e}\r\n".encode()
 
