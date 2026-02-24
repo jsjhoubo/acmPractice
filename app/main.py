@@ -216,7 +216,7 @@ def handle_client(commands, client_socket=None):
             timeout = 0
             if len(commands) == 3:
                 try:
-                    timeout = int(commands[2])
+                    timeout = float(commands[2])
                 except ValueError:
                     response = b"-ERR invalid timeout\r\n"
                     return response
