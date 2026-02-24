@@ -68,6 +68,31 @@ def parse_resp_from_buffer(buffer: bytes):
     return items, buffer[index:]
 
 
+def wake_blocked_clients_for_key(key: str):
+    if key not in blocked_clients_by_key:
+        return
+    if key not in storage or not isinstance(storage[key], list):
+        return
+
+    waiting_clients = blocked_clients_by_key[key]
+    while waiting_clients and storage[key]:
+        client = waiting_clients.pop(0)
+        if client not in send_queue:
+            blocked_client_deadline.pop(client, None)
+            continue
+
+        value = storage[key].pop(0)
+        send_queue[client].append(
+            f"*2\r\n${len(key)}\r\n{key}\r\n${len(value)}\r\n{value}\r\n".encode()
+        )
+        blocked_client_deadline.pop(client, None)
+        if client not in outputs:
+            outputs.append(client)
+
+    if not waiting_clients:
+        blocked_clients_by_key.pop(key, None)
+
+
 def handle_client(commands, client_socket=None):
     response = b""
     try:
@@ -116,18 +141,7 @@ def handle_client(commands, client_socket=None):
                 else:
                     response = f"${len(value)}\r\n{value}\r\n".encode()
         elif commands[0] == "RPUSH":
-            key = commands[1]    
-            if key in blocked_clients_by_key and isinstance(storage.get(key), list) and storage[key]:
-                value = commands[2]
-                if len(blocked_clients_by_key[key]) > 0:
-                    client = blocked_clients_by_key[key].pop(0)
-                    send_queue[client].append(
-                        f"*2\r\n${len(key)}\r\n{key}\r\n${len(value)}\r\n{value}\r\n".encode()
-                    )
-                    if client not in outputs:
-                        outputs.append(client)
-                if len(blocked_clients_by_key[key]) == 0:
-                    blocked_clients_by_key.remove(key) 
+            key = commands[1]
             if key not in storage:
                 storage[key] = []
             elif not isinstance(storage[key], list):
@@ -135,20 +149,10 @@ def handle_client(commands, client_socket=None):
                 return response
             for value in commands[2:]:
                 storage[key].append(value)
+            wake_blocked_clients_for_key(key)
             response = f":{len(storage[key])}\r\n".encode()
         elif commands[0] == "LPUSH":
             key = commands[1]
-            if key in blocked_clients_by_key and isinstance(storage.get(key), list) and storage[key]:
-                value = commands[2]
-                if len( blocked_clients_by_key[key])>0:
-                    client = blocked_clients_by_key[key].pop(0)
-                    send_queue[client].append(
-                        f"*2\r\n${len(key)}\r\n{key}\r\n${len(value)}\r\n{value}\r\n".encode()
-                    )
-                    if client not in outputs:
-                        outputs.append(client)
-                if len (blocked_clients_by_key[key]) == 0:
-                    blocked_clients_by_key.remove(key)
             if key not in storage:
                 storage[key] = []
             elif not isinstance(storage[key], list):
@@ -156,6 +160,7 @@ def handle_client(commands, client_socket=None):
                 return response
             for value in commands[2:]:
                 storage[key].insert(0, value)
+            wake_blocked_clients_for_key(key)
             response = f":{len(storage[key])}\r\n".encode()
         elif commands[0] == "LRANGE":
             key = commands[1]
