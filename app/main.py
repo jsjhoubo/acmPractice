@@ -579,6 +579,14 @@ def handle_client(commands, client_socket=None):
                     if queued_response is None:
                         queued_response = b"$-1\r\n"
                     response += queued_response
+        elif commands[0] == "DISCARD":
+            if client_socket is None:
+                response = b"-ERR DISCARD without MULTI\r\n"
+            elif client_socket not in transaction_queue:
+                response = b"-ERR DISCARD without MULTI\r\n"
+            else:
+                del transaction_queue[client_socket]
+                response = b"+OK\r\n"
 
     except Exception as e:
         response = f"-ERR {e}\r\n".encode()
