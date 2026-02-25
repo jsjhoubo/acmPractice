@@ -383,12 +383,12 @@ def handle_client(commands, client_socket=None):
                 else:
                     value_type = python_type
                 response = f"+{value_type}\r\n".encode()
-        elif commands[0] == "INFO" or commands[0] == "info":
+        elif commands[0].upper() == "INFO":
             if len(commands) == 1:
-                info_content = "role:master"
+                info_content = f"role:{server_role}"
                 response = f"${len(info_content)}\r\n{info_content}\r\n".encode()
             elif len(commands) == 2 and commands[1].lower() == "replication":
-                info_content = "role:master"
+                info_content = f"role:{server_role}"
                 response = f"${len(info_content)}\r\n{info_content}\r\n".encode()
             else:
                 response = b"$0\r\n\r\n"
@@ -623,10 +623,18 @@ def close_client_socket(s, inputs, outputs, recv_buffer, send_queue):
 
 def main():
     port = 6379
+    role = "master"
     if "--port" in sys.argv:
         port_arg_index = sys.argv.index("--port")
         if port_arg_index + 1 < len(sys.argv):
             port = int(sys.argv[port_arg_index + 1])
+    if "--replicaof" in sys.argv:
+        replicaof_arg_index = sys.argv.index("--replicaof")
+        if replicaof_arg_index + 1 < len(sys.argv):
+            role = "slave"
+
+    global server_role
+    server_role = role
 
     global storage
     storage = {}
