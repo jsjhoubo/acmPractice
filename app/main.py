@@ -662,6 +662,13 @@ def main():
 
                         try:
                             while True:
+                                if not recv_buffer[s] and transction_queue.get(s):
+                                    transction_queue[s].append(recv_buffer[s])
+                                    send_queue[s].append(b"+QUEUED\r\n")
+                                    if s not in outputs:
+                                        outputs.append(s)
+                                    continue
+
                                 commands, remaining = parse_resp_from_buffer(recv_buffer[s])
                                 if commands is None:
                                     recv_buffer[s] = remaining
