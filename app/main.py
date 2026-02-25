@@ -685,7 +685,7 @@ def main():
 
                                 recv_buffer[s] = remaining
                                 command_name = commands[0].upper()
-                                if s in transaction_queue and command_name not in ("MULTI", "EXEC"):
+                                if s in transaction_queue and command_name not in ("MULTI", "EXEC", "DISCARD"):
                                     if len(transaction_queue[s]) >= transaction_queue_limit:
                                         response = b"-ERR transaction queue is full\r\n"
                                     else:
