@@ -569,7 +569,7 @@ def handle_client(commands, client_socket=None):
             elif client_socket not in transction_queue:
                 response = b"-ERR EXEC without MULTI\r\n"
             else:
-                response = b"+OK\r\n"
+                response = b"*0\r\n"
                 del transction_queue[client_socket]
 
     except Exception as e:
