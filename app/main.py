@@ -662,20 +662,18 @@ def main():
 
                         try:
                             while True:
-                                if not recv_buffer[s] and transction_queue.get(s):
-                                    transction_queue[s].append(recv_buffer[s])
-                                    send_queue[s].append(b"+QUEUED\r\n")
-                                    if s not in outputs:
-                                        outputs.append(s)
-                                    continue
-
                                 commands, remaining = parse_resp_from_buffer(recv_buffer[s])
                                 if commands is None:
                                     recv_buffer[s] = remaining
                                     break
 
                                 recv_buffer[s] = remaining
-                                response = handle_client(commands, client_socket=s)
+                                command_name = commands[0].upper()
+                                if s in transction_queue and command_name not in ("MULTI", "EXEC"):
+                                    transction_queue[s].append(commands)
+                                    response = b"+QUEUED\r\n"
+                                else:
+                                    response = handle_client(commands, client_socket=s)
                                 if response is not None:
                                     send_queue[s].append(response)
                                     if s not in outputs:
