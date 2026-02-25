@@ -558,6 +558,19 @@ def handle_client(commands, client_socket=None):
             response = b"*-1\r\n"
         elif commands[0] == "MULTI":
             response = b"+OK\r\n"
+            if client_socket is not None:
+                if client_socket in transction_queue:
+                    response = b"-ERR MULTI calls can not be nested\r\n"
+                else:
+                    transction_queue[client_socket] = []
+        elif commands[0] == "EXEC":
+            if client_socket is None:
+                response = b"-ERR EXEC without MULTI\r\n"
+            elif client_socket not in transction_queue:
+                response = b"-ERR EXEC without MULTI\r\n"
+            else:
+                response = b"+OK\r\n"
+                del transction_queue[client_socket]
 
     except Exception as e:
         response = f"-ERR {e}\r\n".encode()
@@ -595,6 +608,8 @@ def main():
     blocked_xread_requests = []
     global commands_queue
     commands_queue = []
+    global transction_queue
+    transction_queue = {}
     # You can use print statements as follows for debugging, they'll be visible when running tests.
     print("Logs from your program will appear here!")
     
