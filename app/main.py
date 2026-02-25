@@ -383,6 +383,15 @@ def handle_client(commands, client_socket=None):
                 else:
                     value_type = python_type
                 response = f"+{value_type}\r\n".encode()
+        elif commands[0] == "INFO" or commands[0] == "info":
+            if len(commands) == 1:
+                info_content = "role:master"
+                response = f"${len(info_content)}\r\n{info_content}\r\n".encode()
+            elif len(commands) == 2 and commands[1].lower() == "replication":
+                info_content = "role:master"
+                response = f"${len(info_content)}\r\n{info_content}\r\n".encode()
+            else:
+                response = b"$0\r\n\r\n"
         elif commands[0] == "XADD":
             if len(commands) < 5 or len(commands[3:]) % 2 != 0:
                 response = b"-ERR wrong number of arguments for 'xadd' command\r\n"
