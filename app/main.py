@@ -1,5 +1,6 @@
 import select
 import socket  # noqa: F401
+import sys
 from datetime import datetime, timedelta
 
 socket_queue_size = 128
@@ -612,6 +613,12 @@ def close_client_socket(s, inputs, outputs, recv_buffer, send_queue):
     s.close()
 
 def main():
+    port = 6379
+    if "--port" in sys.argv:
+        port_arg_index = sys.argv.index("--port")
+        if port_arg_index + 1 < len(sys.argv):
+            port = int(sys.argv[port_arg_index + 1])
+
     global storage
     storage = {}
     global expire_times
@@ -629,7 +636,7 @@ def main():
     # You can use print statements as follows for debugging, they'll be visible when running tests.
     print("Logs from your program will appear here!")
     
-    server_socket = socket.create_server(("127.0.0.1", 6379), reuse_port=True)
+    server_socket = socket.create_server(("127.0.0.1", port), reuse_port=True)
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server_socket.setblocking(False)
     server_socket.listen(socket_queue_size)
