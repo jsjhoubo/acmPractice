@@ -559,18 +559,25 @@ def handle_client(commands, client_socket=None):
         elif commands[0] == "MULTI":
             response = b"+OK\r\n"
             if client_socket is not None:
-                if client_socket in transction_queue:
+                if client_socket in transaction_queue:
                     response = b"-ERR MULTI calls can not be nested\r\n"
                 else:
-                    transction_queue[client_socket] = []
+                    transaction_queue[client_socket] = []
         elif commands[0] == "EXEC":
             if client_socket is None:
                 response = b"-ERR EXEC without MULTI\r\n"
-            elif client_socket not in transction_queue:
+            elif client_socket not in transaction_queue:
                 response = b"-ERR EXEC without MULTI\r\n"
             else:
-                response = b"*0\r\n"
-                del transction_queue[client_socket]
+                queued_commands = transaction_queue[client_socket]
+                del transaction_queue[client_socket]
+
+                response = f"*{len(queued_commands)}\r\n".encode()
+                for queued_command in queued_commands:
+                    queued_response = handle_client(queued_command, client_socket=client_socket)
+                    if queued_response is None:
+                        queued_response = b"$-1\r\n"
+                    response += queued_response
 
     except Exception as e:
         response = f"-ERR {e}\r\n".encode()
@@ -608,8 +615,8 @@ def main():
     blocked_xread_requests = []
     global commands_queue
     commands_queue = []
-    global transction_queue
-    transction_queue = {}
+    global transaction_queue
+    transaction_queue = {}
     # You can use print statements as follows for debugging, they'll be visible when running tests.
     print("Logs from your program will appear here!")
     
@@ -669,8 +676,8 @@ def main():
 
                                 recv_buffer[s] = remaining
                                 command_name = commands[0].upper()
-                                if s in transction_queue and command_name not in ("MULTI", "EXEC"):
-                                    transction_queue[s].append(commands)
+                                if s in transaction_queue and command_name not in ("MULTI", "EXEC"):
+                                    transaction_queue[s].append(commands)
                                     response = b"+QUEUED\r\n"
                                 else:
                                     response = handle_client(commands, client_socket=s)
