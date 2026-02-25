@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 socket_queue_size = 128
 socket_receive_buffer_size = 1024
 socket_timeout = 1
+transaction_queue_limit = 1000
 
 
 class RedisStream:
@@ -677,8 +678,11 @@ def main():
                                 recv_buffer[s] = remaining
                                 command_name = commands[0].upper()
                                 if s in transaction_queue and command_name not in ("MULTI", "EXEC"):
-                                    transaction_queue[s].append(commands)
-                                    response = b"+QUEUED\r\n"
+                                    if len(transaction_queue[s]) >= transaction_queue_limit:
+                                        response = b"-ERR transaction queue is full\r\n"
+                                    else:
+                                        transaction_queue[s].append(commands)
+                                        response = b"+QUEUED\r\n"
                                 else:
                                     response = handle_client(commands, client_socket=s)
                                 if response is not None:
