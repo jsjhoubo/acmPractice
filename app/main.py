@@ -556,6 +556,9 @@ def handle_client(commands, client_socket=None):
                 return None
 
             response = b"*-1\r\n"
+        elif commands[0] == "MULTI":
+            response = b"+OK\r\n"
+
     except Exception as e:
         response = f"-ERR {e}\r\n".encode()
 
@@ -590,6 +593,8 @@ def main():
     blocked_client_deadline = {}
     global blocked_xread_requests
     blocked_xread_requests = []
+    global commands_queue
+    commands_queue = []
     # You can use print statements as follows for debugging, they'll be visible when running tests.
     print("Logs from your program will appear here!")
     
