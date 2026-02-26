@@ -638,11 +638,11 @@ def encode_resp_array(parts):
     return encoded
 
 
-def send_replica_ping(master_host: str, master_port: int):
+def send_replica_ping(master_host: str, master_port: int, listening_port: int):
     master_socket = socket.create_connection((master_host, master_port), timeout=socket_timeout)
     try:
         master_socket.sendall(encode_resp_array(["PING"]))
-        master_socket.sendall(encode_resp_array(["REPLCONF", "listening-port", str(master_port)]))
+        master_socket.sendall(encode_resp_array(["REPLCONF", "listening-port", str(listening_port)]))
         master_socket.sendall(encode_resp_array(["REPLCONF", "capa", "eof"]))
     finally:
         master_socket.close()
@@ -708,7 +708,7 @@ def main():
     server_socket.listen(socket_queue_size)
 
     if server_role == "slave" and master_host is not None and master_port is not None:
-        send_replica_ping(master_host, master_port)
+        send_replica_ping(master_host, master_port, port)
 
     inputs = [server_socket]
     global outputs
