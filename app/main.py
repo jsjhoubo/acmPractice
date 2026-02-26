@@ -219,6 +219,11 @@ def handle_client(commands, client_socket=None):
 
         if commands[0] == "PING":
             response = b"+PONG\r\n"
+        elif commands[0] == "REPLCONF":
+            if len(commands) != 3:
+                response = b"-ERR wrong number of arguments for 'replconf' command\r\n"
+            else:
+                response = b"+OK\r\n"
         elif commands[0] == "ECHO":
             if len(commands) != 2:
                 response = b"-ERR wrong number of arguments for 'echo' command\r\n"
