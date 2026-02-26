@@ -642,10 +642,24 @@ def send_replica_ping(master_host: str, master_port: int, listening_port: int):
     master_socket = socket.create_connection((master_host, master_port), timeout=socket_timeout)
     try:
         master_socket.sendall(encode_resp_array(["PING"]))
+        mast_response = master_socket.recv(socket_receive_buffer_size)
+        if mast_response != b"+PONG\r\n":
+            print(f"Unexpected response from master: {mast_response.decode()}")
+            return False
+        
         master_socket.sendall(encode_resp_array(["REPLCONF", "listening-port", str(listening_port)]))
+        master_response = master_socket.recv(socket_receive_buffer_size)
+        if master_response != b"+OK\r\n":
+            print(f"Unexpected response from master: {master_response.decode()}")
+            return False
         master_socket.sendall(encode_resp_array(["REPLCONF", "capa", "psync2"]))
+        master_response = master_socket.recv(socket_receive_buffer_size)
+        if master_response != b"+OK\r\n":
+            print(f"Unexpected response from master: {master_response.decode()}")
+            return False
     finally:
         master_socket.close()
+    return True
 
 def main():
     port = 6379
@@ -708,7 +722,9 @@ def main():
     server_socket.listen(socket_queue_size)
 
     if server_role == "slave" and master_host is not None and master_port is not None:
-        send_replica_ping(master_host, master_port, port)
+        if not send_replica_ping(master_host, master_port, port):
+            print("Failed to communicate with master, exiting.")
+            return
 
     inputs = [server_socket]
     global outputs
