@@ -223,10 +223,14 @@ def handle_client(commands, client_socket=None):
             if len(commands) != 3:
                 response = b"-ERR wrong number of arguments for 'replconf' command\r\n"
             else:
-                if commands[1] == '?' and commands[2] == '-1':
-                    response = b"+FULLRESYNC 8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb 0\r\n"
-                else:
-                    response = b"+OK\r\n"
+                response = b"+OK\r\n"
+        elif commands[0] == "PSYNC":
+            if len(commands) != 3:
+                response = b"-ERR wrong number of arguments for 'psync' command\r\n"
+            elif commands[1] != "?" or commands[2] != "-1":
+                response = b"-ERR invalid arguments for 'psync' command\r\n"
+            else:
+                response = b"+FULLRESYNC 8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb 0\r\n"
         elif commands[0] == "ECHO":
             if len(commands) != 2:
                 response = b"-ERR wrong number of arguments for 'echo' command\r\n"
@@ -285,6 +289,9 @@ def handle_client(commands, client_socket=None):
                     else:
                         storage[key] = str(incremented_value)
                         response = f":{incremented_value}\r\n".encode()
+        elif commands[0] == "PSYNC":
+            # 响应副本请求全量同步
+            response = f"+FULLRESYNC {master_replid} {master_repl_offset}\r\n".encode()
         elif commands[0] == "RPUSH":
             key = commands[1]
             if key not in storage:
