@@ -385,10 +385,18 @@ def handle_client(commands, client_socket=None):
                 response = f"+{value_type}\r\n".encode()
         elif commands[0].upper() == "INFO":
             if len(commands) == 1:
-                info_content = f"role:{server_role}"
+                info_content = (
+                    f"role:{server_role}\r\n"
+                    f"master_replid:{master_replid}\r\n"
+                    f"master_repl_offset:{master_repl_offset}"
+                )
                 response = f"${len(info_content)}\r\n{info_content}\r\n".encode()
             elif len(commands) == 2 and commands[1].lower() == "replication":
-                info_content = f"role:{server_role}"
+                info_content = (
+                    f"role:{server_role}\r\n"
+                    f"master_replid:{master_replid}\r\n"
+                    f"master_repl_offset:{master_repl_offset}"
+                )
                 response = f"${len(info_content)}\r\n{info_content}\r\n".encode()
             else:
                 response = b"$0\r\n\r\n"
@@ -635,6 +643,10 @@ def main():
 
     global server_role
     server_role = role
+    global master_replid
+    master_replid = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb"
+    global master_repl_offset
+    master_repl_offset = 0
 
     global storage
     storage = {}
