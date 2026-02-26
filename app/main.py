@@ -629,9 +629,27 @@ def close_client_socket(s, inputs, outputs, recv_buffer, send_queue):
     send_queue.pop(s, None)
     s.close()
 
+
+def encode_resp_array(parts):
+    encoded = f"*{len(parts)}\r\n".encode()
+    for part in parts:
+        encoded_part = part.encode()
+        encoded += f"${len(encoded_part)}\r\n".encode() + encoded_part + b"\r\n"
+    return encoded
+
+
+def send_replica_ping(master_host: str, master_port: int):
+    master_socket = socket.create_connection((master_host, master_port), timeout=socket_timeout)
+    try:
+        master_socket.sendall(encode_resp_array(["PING"]))
+    finally:
+        master_socket.close()
+
 def main():
     port = 6379
     role = "master"
+    master_host = None
+    master_port = None
     if "--port" in sys.argv:
         port_arg_index = sys.argv.index("--port")
         if port_arg_index + 1 < len(sys.argv):
@@ -640,6 +658,23 @@ def main():
         replicaof_arg_index = sys.argv.index("--replicaof")
         if replicaof_arg_index + 1 < len(sys.argv):
             role = "slave"
+            master_info = sys.argv[replicaof_arg_index + 1]
+            if " " in master_info:
+                parts = master_info.split()
+                if len(parts) != 2:
+                    print("Usage: --replicaof \"<master_host> <master_port>\"")
+                    return
+                master_host, master_port = parts[0], int(parts[1])
+            elif ":" in master_info:
+                host_part, port_part = master_info.split(":", 1)
+                master_host, master_port = host_part, int(port_part)
+            else:
+                print("Usage: --replicaof \"<master_host> <master_port>\"")
+                return
+            
+        else:
+            print("Usage: --replicaof \"<master_host> <master_port>\"")
+            return
 
     global server_role
     server_role = role
@@ -669,6 +704,9 @@ def main():
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server_socket.setblocking(False)
     server_socket.listen(socket_queue_size)
+
+    if server_role == "slave" and master_host is not None and master_port is not None:
+        send_replica_ping(master_host, master_port)
 
     inputs = [server_socket]
     global outputs
