@@ -657,6 +657,11 @@ def send_replica_ping(master_host: str, master_port: int, listening_port: int):
         if master_response != b"+OK\r\n":
             print(f"Unexpected response from master: {master_response.decode()}")
             return False
+        master_socket.sendall(encode_resp_array(["PSYNC", "?", "-1"]))
+        master_response = master_socket.recv(socket_receive_buffer_size)
+        if not master_response.startswith(b"+FULLRESYNC"):
+            print(f"Unexpected response from master: {master_response.decode()}")
+            return False
     finally:
         master_socket.close()
     return True
