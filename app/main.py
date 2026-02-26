@@ -642,19 +642,7 @@ def send_replica_ping(master_host: str, master_port: int):
     master_socket = socket.create_connection((master_host, master_port), timeout=socket_timeout)
     try:
         master_socket.sendall(encode_resp_array(["PING"]))
-    finally:
-        master_socket.close()
-
-def send_replica_conf_first(master_host: str, master_port: int):
-    master_socket = socket.create_connection((master_host, master_port), timeout=socket_timeout)
-    try:
         master_socket.sendall(encode_resp_array(["REPLCONF", "listening-port", str(master_port)]))
-    finally:
-        master_socket.close()
-
-def send_replica_conf_second(master_host: str, master_port: int):
-    master_socket = socket.create_connection((master_host, master_port), timeout=socket_timeout)
-    try:
         master_socket.sendall(encode_resp_array(["REPLCONF", "capa", "eof"]))
     finally:
         master_socket.close()
@@ -721,8 +709,6 @@ def main():
 
     if server_role == "slave" and master_host is not None and master_port is not None:
         send_replica_ping(master_host, master_port)
-        send_replica_conf_first(master_host, master_port)
-        send_replica_conf_second(master_host, master_port)
 
     inputs = [server_socket]
     global outputs
