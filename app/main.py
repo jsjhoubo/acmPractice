@@ -223,7 +223,10 @@ def handle_client(commands, client_socket=None):
             if len(commands) != 3:
                 response = b"-ERR wrong number of arguments for 'replconf' command\r\n"
             else:
-                response = b"+OK\r\n"
+                if commands[1] == '?' and commands[2] == '-1':
+                    response = b"+FULLRESYNC 8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb 0\r\n"
+                else:
+                    response = b"+OK\r\n"
         elif commands[0] == "ECHO":
             if len(commands) != 2:
                 response = b"-ERR wrong number of arguments for 'echo' command\r\n"
