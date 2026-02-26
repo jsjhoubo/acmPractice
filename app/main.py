@@ -643,7 +643,7 @@ def send_replica_ping(master_host: str, master_port: int, listening_port: int):
     try:
         master_socket.sendall(encode_resp_array(["PING"]))
         master_socket.sendall(encode_resp_array(["REPLCONF", "listening-port", str(listening_port)]))
-        master_socket.sendall(encode_resp_array(["REPLCONF", "capa", "eof"]))
+        master_socket.sendall(encode_resp_array(["REPLCONF", "capa", "psync2"]))
     finally:
         master_socket.close()
 
