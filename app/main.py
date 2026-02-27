@@ -233,9 +233,10 @@ def handle_client(commands, client_socket=None):
                 # 先返回 simple string
                 response = f"+FULLRESYNC {master_replid} {master_repl_offset}\r\n".encode()
                 # 再发送空RDB bulk string（REDIS0001 + 8字节版本号 + 0xFF）
-                # 标准 RDB 头: REDIS0006\n (带换行), 然后 EOF (0xFF) 和 8 字节 CRC 占位
-                # hex for: b"REDIS0006\n" + b"\xff" + 8 zero bytes
-                empty_rdb_hex = "5245444953303030360aff0000000000000000"
+                # 更完整的最小空 RDB:
+                # header: "REDIS0006\n" (hex), SELECTDB opcode (0xFE) + db 0 (0x00), EOF (0xFF), 8-byte checksum (zeroed)
+                # hex = header + fe00 + ff + 8 zero bytes
+                empty_rdb_hex = "5245444953303030360afe00ff0000000000000000"
                 empty_rdb_bytes = bytes.fromhex(empty_rdb_hex)
                 rdb_len = len(empty_rdb_bytes)
                 rdb_header = f"${rdb_len}\r\n".encode()
