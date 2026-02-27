@@ -211,6 +211,25 @@ def wake_blocked_clients_for_key(key: str, max_wake_count: int):
         blocked_clients_by_key.pop(key, None)
 
 
+def propagate_to_replicas(commands, source_client=None):
+    if server_role != "master":
+        return
+
+    if not replica_connections:
+        return
+
+    encoded_command = encode_resp_array(commands)
+    for replica_socket in list(replica_connections):
+        if replica_socket is source_client:
+            continue
+        if replica_socket not in send_queue:
+            replica_connections.discard(replica_socket)
+            continue
+        send_queue[replica_socket].append(encoded_command)
+        if replica_socket not in outputs:
+            outputs.append(replica_socket)
+
+
 def handle_client(commands, client_socket=None):
     response = b""
     try:
@@ -230,19 +249,18 @@ def handle_client(commands, client_socket=None):
             elif commands[1] != "?" or commands[2] != "-1":
                 response = b"-ERR invalid arguments for 'psync' command\r\n"
             else:
-                # 先返回 simple string
                 response = f"+FULLRESYNC {master_replid} {master_repl_offset}\r\n".encode()
-                # 再发送空RDB bulk string（REDIS0001 + 8字节版本号 + 0xFF）
-                # 更完整的最小空 RDB:
-                # header: "REDIS0006\n" (hex), SELECTDB opcode (0xFE) + db 0 (0x00), EOF (0xFF), 8-byte checksum (zeroed)
-                # hex = header + fe00 + ff + 8 zero bytes
-                empty_rdb_hex = "5245444953303030360afe00ff0000000000000000"
+                if client_socket is not None:
+                    replica_connections.add(client_socket)
+                empty_rdb_hex = (
+                    "524544495330303132fa0972656469732d76657205372e342e38"
+                    "fa0a72656469732d62697473c040fa056374696d65c2a111a169"
+                    "fa08757365642d6d656dc2d00e0f00fa08616f662d62617365c000ff"
+                )
                 empty_rdb_bytes = bytes.fromhex(empty_rdb_hex)
-                rdb_len = len(empty_rdb_bytes)
-                rdb_header = f"${rdb_len}\r\n".encode()
+                rdb_header = f"${len(empty_rdb_bytes)}\r\n".encode()
                 client_socket.sendall(response)
-                # bulk string 内容后必须以 CRLF 终止
-                client_socket.sendall(rdb_header + empty_rdb_bytes + b"\r\n")
+                client_socket.sendall(rdb_header + empty_rdb_bytes)
                 response = None
         elif commands[0] == "ECHO":
             if len(commands) != 2:
@@ -254,6 +272,7 @@ def handle_client(commands, client_socket=None):
                 key = commands[1]
                 value = commands[2]
                 storage[key] = value
+                propagate_to_replicas(commands, source_client=client_socket)
                 response = b"+OK\r\n"
             elif len(commands) == 5 and (commands[3].upper() == "EX" or commands[3].upper() == "PX"):
                 key = commands[1]
@@ -265,6 +284,7 @@ def handle_client(commands, client_socket=None):
                 elif commands[3].upper() == "PX":
                     expire_time = datetime.now() + timedelta(milliseconds=timeout_value)
                 expire_times[key] = expire_time
+                propagate_to_replicas(commands, source_client=client_socket)
                 response = b"+OK\r\n"
             else:
                 response = b"-ERR wrong number of arguments for 'set' command\r\n"
@@ -641,6 +661,7 @@ def close_client_socket(s, inputs, outputs, recv_buffer, send_queue):
     global blocked_xread_requests
 
     blocked_client_deadline.pop(s, None)
+    replica_connections.discard(s)
     for clients in blocked_clients_by_key.values():
         if s in clients:
             clients.remove(s)
@@ -739,6 +760,8 @@ def main():
     blocked_client_deadline = {}
     global blocked_xread_requests
     blocked_xread_requests = []
+    global replica_connections
+    replica_connections = set()
     global commands_queue
     commands_queue = []
     global transaction_queue
