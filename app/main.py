@@ -236,7 +236,8 @@ def handle_client(commands, client_socket=None):
                 empty_rdb_bytes = bytes.fromhex(empty_rdb_hex)
                 rdb_len = len(empty_rdb_bytes)
                 rdb_header = f"${rdb_len}\r\n".encode()
-                client_socket.sendall(rdb_header + empty_rdb_bytes)
+                # 修复：bulk string 需以 \r\n 结尾
+                client_socket.sendall(rdb_header + empty_rdb_bytes + b"\r\n")
         elif commands[0] == "ECHO":
             if len(commands) != 2:
                 response = b"-ERR wrong number of arguments for 'echo' command\r\n"
