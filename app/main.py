@@ -212,9 +212,6 @@ def wake_blocked_clients_for_key(key: str, max_wake_count: int):
 
 
 def propagate_to_replicas(commands, source_client=None):
-    if server_role != "master":
-        return
-
     if not replica_connections:
         return
 
@@ -242,7 +239,10 @@ def handle_client(commands, client_socket=None):
             if len(commands) != 3:
                 response = b"-ERR wrong number of arguments for 'replconf' command\r\n"
             else:
-                response = b"+OK\r\n"
+                if commands[1].upper() == "GETACK" and commands[2] == "*":
+                    response = b"*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$1\r\n0\r\n"
+                else:
+                    response = b"+OK\r\n"
         elif commands[0] == "PSYNC":
             if len(commands) != 3:
                 response = b"-ERR wrong number of arguments for 'psync' command\r\n"
@@ -430,18 +430,40 @@ def handle_client(commands, client_socket=None):
                 response = f"+{value_type}\r\n".encode()
         elif commands[0].upper() == "INFO":
             if len(commands) == 1:
-                info_content = (
-                    f"role:{server_role}\r\n"
-                    f"master_replid:{master_replid}\r\n"
-                    f"master_repl_offset:{master_repl_offset}"
-                )
+                role_for_info = "slave" if upstream_master_host is not None else "master"
+                info_lines = [
+                    f"role:{role_for_info}",
+                    f"master_replid:{master_replid}",
+                    f"master_repl_offset:{master_repl_offset}",
+                    f"connected_slaves:{len(replica_connections)}",
+                ]
+                if upstream_master_host is not None:
+                    info_lines.extend(
+                        [
+                            f"master_host:{upstream_master_host}",
+                            f"master_port:{upstream_master_port}",
+                            f"master_link_status:{'up' if upstream_connected else 'down'}",
+                        ]
+                    )
+                info_content = "\r\n".join(info_lines)
                 response = f"${len(info_content)}\r\n{info_content}\r\n".encode()
             elif len(commands) == 2 and commands[1].lower() == "replication":
-                info_content = (
-                    f"role:{server_role}\r\n"
-                    f"master_replid:{master_replid}\r\n"
-                    f"master_repl_offset:{master_repl_offset}"
-                )
+                role_for_info = "slave" if upstream_master_host is not None else "master"
+                info_lines = [
+                    f"role:{role_for_info}",
+                    f"master_replid:{master_replid}",
+                    f"master_repl_offset:{master_repl_offset}",
+                    f"connected_slaves:{len(replica_connections)}",
+                ]
+                if upstream_master_host is not None:
+                    info_lines.extend(
+                        [
+                            f"master_host:{upstream_master_host}",
+                            f"master_port:{upstream_master_port}",
+                            f"master_link_status:{'up' if upstream_connected else 'down'}",
+                        ]
+                    )
+                info_content = "\r\n".join(info_lines)
                 response = f"${len(info_content)}\r\n{info_content}\r\n".encode()
             else:
                 response = b"$0\r\n\r\n"
@@ -796,6 +818,12 @@ def main():
 
     global server_role
     server_role = role
+    global upstream_master_host
+    upstream_master_host = master_host
+    global upstream_master_port
+    upstream_master_port = master_port
+    global upstream_connected
+    upstream_connected = False
     global master_replid
     master_replid = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb"
     global master_repl_offset
@@ -832,6 +860,7 @@ def main():
         if master_connection is None:
             print("Failed to communicate with master, exiting.")
             return
+        upstream_connected = True
         master_connection.setblocking(False)
         inputs.append(master_connection)
 
@@ -842,9 +871,43 @@ def main():
     global send_queue
     send_queue = {}
 
+    def flush_send_queue_for_socket(s):
+        if s in send_queue and send_queue[s]:
+            while send_queue[s]:
+                message = send_queue[s].pop(0)
+                s.sendall(message)
+        if s in outputs and (s not in send_queue or not send_queue[s]):
+            outputs.remove(s)
+
     if master_connection is not None:
         recv_buffer[master_connection] = master_initial_buffer
         send_queue[master_connection] = []
+        if master_initial_buffer:
+            try:
+                while True:
+                    commands, remaining = parse_resp_from_buffer(recv_buffer[master_connection])
+                    if commands is None:
+                        recv_buffer[master_connection] = remaining
+                        break
+
+                    recv_buffer[master_connection] = remaining
+                    response = handle_client(commands, client_socket=master_connection)
+                    is_getack_request = (
+                        len(commands) == 3
+                        and commands[0].upper() == "REPLCONF"
+                        and commands[1].upper() == "GETACK"
+                        and commands[2] == "*"
+                    )
+                    if not is_getack_request:
+                        response = None
+
+                    if response is not None:
+                        send_queue[master_connection].append(response)
+                        if master_connection not in outputs:
+                            outputs.append(master_connection)
+                        flush_send_queue_for_socket(master_connection)
+            except ValueError:
+                recv_buffer[master_connection] = b""
 
     try:
         while True:
@@ -899,11 +962,20 @@ def main():
                                 else:
                                     response = handle_client(commands, client_socket=s)
                                     if master_connection is not None and s is master_connection:
-                                        response = None
+                                        is_getack_request = (
+                                            len(commands) == 3
+                                            and commands[0].upper() == "REPLCONF"
+                                            and commands[1].upper() == "GETACK"
+                                            and commands[2] == "*"
+                                        )
+                                        if not is_getack_request:
+                                            response = None
                                 if response is not None:
                                     send_queue[s].append(response)
                                     if s not in outputs:
                                         outputs.append(s)
+                                    if master_connection is not None and s is master_connection:
+                                        flush_send_queue_for_socket(s)
                         except ValueError as e:
                             if master_connection is not None and s is master_connection:
                                 recv_buffer[s] = b""
@@ -917,12 +989,7 @@ def main():
             for s in writable:
                 if s in send_queue and send_queue[s]:
                     try:
-                        while send_queue[s]:
-                            message = send_queue[s].pop(0)
-                            s.sendall(message)
-
-                        if s in outputs:
-                            outputs.remove(s)
+                        flush_send_queue_for_socket(s)
                     except Exception as e:
                         print(f"处理客户端 {s.getpeername()} 时出错: {e}")
                         close_client_socket(s, inputs, outputs, recv_buffer, send_queue)
