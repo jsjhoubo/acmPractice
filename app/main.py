@@ -245,8 +245,8 @@ def handle_client(commands, client_socket=None):
                 try:
                     if client_socket is not None and client_socket in send_queue:
                         send_queue[client_socket].append(fullres)
-                        # 将 RDB 以 bulk string 形式入队（包含尾部 CRLF，兼容解析器）
-                        send_queue[client_socket].append(rdb_header + empty_rdb_bytes + b"\r\n")
+                        # 将 RDB 以 bulk string 形式入队（不包含尾部 CRLF，按题目要求）
+                        send_queue[client_socket].append(rdb_header + empty_rdb_bytes)
                         if client_socket not in outputs:
                             outputs.append(client_socket)
                         response = None
