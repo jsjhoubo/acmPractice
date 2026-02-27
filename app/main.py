@@ -686,31 +686,82 @@ def encode_resp_array(parts):
 
 def send_replica_ping(master_host: str, master_port: int, listening_port: int):
     master_socket = socket.create_connection((master_host, master_port), timeout=socket_timeout)
+    handshake_buffer = b""
+
+    def read_line_from_master():
+        nonlocal handshake_buffer
+        while True:
+            line_end_index = handshake_buffer.find(b"\r\n")
+            if line_end_index != -1:
+                line = handshake_buffer[:line_end_index]
+                handshake_buffer = handshake_buffer[line_end_index + 2:]
+                return line
+
+            chunk = master_socket.recv(socket_receive_buffer_size)
+            if not chunk:
+                raise ConnectionError("connection closed by master")
+            handshake_buffer += chunk
+
+    def read_exact_from_master(expected_size: int):
+        nonlocal handshake_buffer
+        while len(handshake_buffer) < expected_size:
+            chunk = master_socket.recv(socket_receive_buffer_size)
+            if not chunk:
+                raise ConnectionError("connection closed by master")
+            handshake_buffer += chunk
+
+        data = handshake_buffer[:expected_size]
+        handshake_buffer = handshake_buffer[expected_size:]
+        return data
+
     try:
         master_socket.sendall(encode_resp_array(["PING"]))
-        mast_response = master_socket.recv(socket_receive_buffer_size)
-        if mast_response != b"+PONG\r\n":
-            print(f"Unexpected response from master: {mast_response.decode()}")
-            return False
-        
+        ping_response = read_line_from_master()
+        if ping_response != b"+PONG":
+            print(f"Unexpected response from master: {ping_response.decode(errors='replace')}")
+            master_socket.close()
+            return None, b""
+
         master_socket.sendall(encode_resp_array(["REPLCONF", "listening-port", str(listening_port)]))
-        master_response = master_socket.recv(socket_receive_buffer_size)
-        if master_response != b"+OK\r\n":
-            print(f"Unexpected response from master: {master_response.decode()}")
-            return False
+        replconf_port_response = read_line_from_master()
+        if replconf_port_response != b"+OK":
+            print(f"Unexpected response from master: {replconf_port_response.decode(errors='replace')}")
+            master_socket.close()
+            return None, b""
+
         master_socket.sendall(encode_resp_array(["REPLCONF", "capa", "psync2"]))
-        master_response = master_socket.recv(socket_receive_buffer_size)
-        if master_response != b"+OK\r\n":
-            print(f"Unexpected response from master: {master_response.decode()}")
-            return False
+        replconf_capa_response = read_line_from_master()
+        if replconf_capa_response != b"+OK":
+            print(f"Unexpected response from master: {replconf_capa_response.decode(errors='replace')}")
+            master_socket.close()
+            return None, b""
+
         master_socket.sendall(encode_resp_array(["PSYNC", "?", "-1"]))
-        master_response = master_socket.recv(socket_receive_buffer_size)
-        if not master_response.startswith(b"+FULLRESYNC"):
-            print(f"Unexpected response from master: {master_response.decode()}")
-            return False
-    finally:
+        psync_response = read_line_from_master()
+        if not psync_response.startswith(b"+FULLRESYNC"):
+            print(f"Unexpected response from master: {psync_response.decode(errors='replace')}")
+            master_socket.close()
+            return None, b""
+
+        rdb_header = read_line_from_master()
+        if not rdb_header.startswith(b"$"):
+            print(f"Unexpected RDB header from master: {rdb_header.decode(errors='replace')}")
+            master_socket.close()
+            return None, b""
+
+        rdb_length = int(rdb_header[1:])
+        if rdb_length < 0:
+            print("Unexpected negative RDB length from master")
+            master_socket.close()
+            return None, b""
+
+        read_exact_from_master(rdb_length)
+    except (ConnectionError, OSError, ValueError) as error:
+        print(f"Unexpected response from master: {error}")
         master_socket.close()
-    return True
+        return None, b""
+
+    return master_socket, handshake_buffer
 
 def main():
     port = 6379
@@ -773,18 +824,27 @@ def main():
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server_socket.setblocking(False)
     server_socket.listen(socket_queue_size)
-
+    inputs = [server_socket]
+    master_connection = None
+    master_initial_buffer = b""
     if server_role == "slave" and master_host is not None and master_port is not None:
-        if not send_replica_ping(master_host, master_port, port):
+        master_connection, master_initial_buffer = send_replica_ping(master_host, master_port, port)
+        if master_connection is None:
             print("Failed to communicate with master, exiting.")
             return
+        master_connection.setblocking(False)
+        inputs.append(master_connection)
 
-    inputs = [server_socket]
+    
     global outputs
     outputs = []
     recv_buffer = {}
     global send_queue
     send_queue = {}
+
+    if master_connection is not None:
+        recv_buffer[master_connection] = master_initial_buffer
+        send_queue[master_connection] = []
 
     try:
         while True:
@@ -838,15 +898,20 @@ def main():
                                         response = b"+QUEUED\r\n"
                                 else:
                                     response = handle_client(commands, client_socket=s)
+                                    if master_connection is not None and s is master_connection:
+                                        response = None
                                 if response is not None:
                                     send_queue[s].append(response)
                                     if s not in outputs:
                                         outputs.append(s)
                         except ValueError as e:
-                            send_queue[s].append(f"-ERR {e}\r\n".encode())
-                            recv_buffer[s] = b""
-                            if s not in outputs:
-                                outputs.append(s)
+                            if master_connection is not None and s is master_connection:
+                                recv_buffer[s] = b""
+                            else:
+                                send_queue[s].append(f"-ERR {e}\r\n".encode())
+                                recv_buffer[s] = b""
+                                if s not in outputs:
+                                    outputs.append(s)
                     else:
                         close_client_socket(s, inputs, outputs, recv_buffer, send_queue)
             for s in writable:
