@@ -238,8 +238,8 @@ def handle_client(commands, client_socket=None):
                 rdb_len = len(empty_rdb_bytes)
                 rdb_header = f"${rdb_len}\r\n".encode()
                 client_socket.sendall(response)
-                client_socket.sendall(rdb_header + empty_rdb_bytes + b"\r\n")
-                response = b""  # 避免重复返回
+                client_socket.sendall(rdb_header + empty_rdb_bytes)
+                response = None
         elif commands[0] == "ECHO":
             if len(commands) != 2:
                 response = b"-ERR wrong number of arguments for 'echo' command\r\n"
