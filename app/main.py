@@ -230,31 +230,16 @@ def handle_client(commands, client_socket=None):
             elif commands[1] != "?" or commands[2] != "-1":
                 response = b"-ERR invalid arguments for 'psync' command\r\n"
             else:
-                # 将 FULLRESYNC 和空 RDB 放入发送队列（避免在非阻塞 socket 上直接 sendall）
-                fullres = f"+FULLRESYNC {master_replid} {master_repl_offset}\r\n".encode()
-                # 使用从真实 Redis 生成的空 RDB 文件二进制（hex）
-                empty_rdb_hex = (
-                    "524544495330303132fa0972656469732d76657205372e342e38"
-                    "fa0a72656469732d62697473c040fa056374696d65c2a111a169"
-                    "fa08757365642d6d656dc2d00e0f00fa08616f662d62617365c000ff"
-                )
+                # 先返回 simple string
+                response = f"+FULLRESYNC {master_replid} {master_repl_offset}\r\n".encode()
+                # 再发送空RDB bulk string
+                empty_rdb_hex = "524544495330303031"  # REDIS0001
                 empty_rdb_bytes = bytes.fromhex(empty_rdb_hex)
                 rdb_len = len(empty_rdb_bytes)
                 rdb_header = f"${rdb_len}\r\n".encode()
-                # 如果可以访问全局 send_queue，则把数据入队并确保该 socket 在 outputs 中
-                try:
-                    if client_socket is not None and client_socket in send_queue:
-                        send_queue[client_socket].append(fullres)
-                        # 将 RDB 以 bulk string 形式入队（不包含尾部 CRLF，按题目要求）
-                        send_queue[client_socket].append(rdb_header + empty_rdb_bytes)
-                        if client_socket not in outputs:
-                            outputs.append(client_socket)
-                        response = None
-                    else:
-                        # 回退到直接返回 FULLRESYNC（主循环会发送）
-                        response = fullres
-                except Exception:
-                    response = fullres
+                client_socket.sendall(response)
+                client_socket.sendall(rdb_header + empty_rdb_bytes)
+                response = None
         elif commands[0] == "ECHO":
             if len(commands) != 2:
                 response = b"-ERR wrong number of arguments for 'echo' command\r\n"
