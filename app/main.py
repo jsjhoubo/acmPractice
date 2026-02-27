@@ -232,8 +232,12 @@ def handle_client(commands, client_socket=None):
             else:
                 # 将 FULLRESYNC 和空 RDB 放入发送队列（避免在非阻塞 socket 上直接 sendall）
                 fullres = f"+FULLRESYNC {master_replid} {master_repl_offset}\r\n".encode()
-                # 使用有效的最小空 RDB：header 'REDIS0006\n' + EOF opcode + 8-byte checksum
-                empty_rdb_hex = "5245444953303030360aff0000000000000000"
+                # 使用从真实 Redis 生成的空 RDB 文件二进制（hex）
+                empty_rdb_hex = (
+                    "524544495330303132fa0972656469732d76657205372e342e38"
+                    "fa0a72656469732d62697473c040fa056374696d65c2a111a169"
+                    "fa08757365642d6d656dc2d00e0f00fa08616f662d62617365c000ff"
+                )
                 empty_rdb_bytes = bytes.fromhex(empty_rdb_hex)
                 rdb_len = len(empty_rdb_bytes)
                 rdb_header = f"${rdb_len}\r\n".encode()
