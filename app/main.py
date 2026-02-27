@@ -232,13 +232,14 @@ def handle_client(commands, client_socket=None):
             else:
                 # 先返回 simple string
                 response = f"+FULLRESYNC {master_replid} {master_repl_offset}\r\n".encode()
-                # 再发送空RDB bulk string
-                empty_rdb_hex = "524544495330303031"  # REDIS0001
+                # 再发送空RDB bulk string（REDIS0001 + 8字节版本号 + 0xFF）
+                empty_rdb_hex = "5245444953303030313030303030303030ff"
                 empty_rdb_bytes = bytes.fromhex(empty_rdb_hex)
                 rdb_len = len(empty_rdb_bytes)
                 rdb_header = f"${rdb_len}\r\n".encode()
                 client_socket.sendall(response)
-                client_socket.sendall(rdb_header + empty_rdb_bytes)
+                # bulk string 内容后必须以 CRLF 终止
+                client_socket.sendall(rdb_header + empty_rdb_bytes + b"\r\n")
                 response = None
         elif commands[0] == "ECHO":
             if len(commands) != 2:
