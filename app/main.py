@@ -233,7 +233,7 @@ def handle_client(commands, client_socket=None):
                 # 先返回 simple string
                 response = f"+FULLRESYNC {master_replid} {master_repl_offset}\r\n".encode()
                 # 再发送空RDB bulk string
-                empty_rdb_hex = "524544495330303030"
+                empty_rdb_hex = "524544495330303031"  # REDIS0001
                 empty_rdb_bytes = bytes.fromhex(empty_rdb_hex)
                 rdb_len = len(empty_rdb_bytes)
                 rdb_header = f"${rdb_len}\r\n".encode()
