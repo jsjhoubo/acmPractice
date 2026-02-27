@@ -230,14 +230,16 @@ def handle_client(commands, client_socket=None):
             elif commands[1] != "?" or commands[2] != "-1":
                 response = b"-ERR invalid arguments for 'psync' command\r\n"
             else:
-                response =  response = f"+FULLRESYNC {master_replid} {master_repl_offset}\r\n".encode()
-                 # 发送空RDB文件（二进制快照）
+                # 先返回 simple string
+                response = f"+FULLRESYNC {master_replid} {master_repl_offset}\r\n".encode()
+                # 再发送空RDB bulk string
                 empty_rdb_hex = "524544495330303030"
                 empty_rdb_bytes = bytes.fromhex(empty_rdb_hex)
                 rdb_len = len(empty_rdb_bytes)
                 rdb_header = f"${rdb_len}\r\n".encode()
-                # 修复：bulk string 需以 \r\n 结尾
+                client_socket.sendall(response)
                 client_socket.sendall(rdb_header + empty_rdb_bytes + b"\r\n")
+                response = b""  # 避免重复返回
         elif commands[0] == "ECHO":
             if len(commands) != 2:
                 response = b"-ERR wrong number of arguments for 'echo' command\r\n"
