@@ -230,16 +230,25 @@ def handle_client(commands, client_socket=None):
             elif commands[1] != "?" or commands[2] != "-1":
                 response = b"-ERR invalid arguments for 'psync' command\r\n"
             else:
-                # 先返回 simple string
-                response = f"+FULLRESYNC {master_replid} {master_repl_offset}\r\n".encode()
-                # 再发送空RDB bulk string
-                empty_rdb_hex = "524544495330303031"  # REDIS0001
+                # 将 FULLRESYNC 和空 RDB 放入发送队列（避免在非阻塞 socket 上直接 sendall）
+                fullres = f"+FULLRESYNC {master_replid} {master_repl_offset}\r\n".encode()
+                empty_rdb_hex = "524544495330303030"  # REDIS0000
                 empty_rdb_bytes = bytes.fromhex(empty_rdb_hex)
                 rdb_len = len(empty_rdb_bytes)
                 rdb_header = f"${rdb_len}\r\n".encode()
-                client_socket.sendall(response)
-                client_socket.sendall(rdb_header + empty_rdb_bytes)
-                response = None
+                # 如果可以访问全局 send_queue，则把数据入队并确保该 socket 在 outputs 中
+                try:
+                    if client_socket is not None and client_socket in send_queue:
+                        send_queue[client_socket].append(fullres)
+                        send_queue[client_socket].append(rdb_header + empty_rdb_bytes)
+                        if client_socket not in outputs:
+                            outputs.append(client_socket)
+                        response = None
+                    else:
+                        # 回退到直接返回 FULLRESYNC（主循环会发送）
+                        response = fullres
+                except Exception:
+                    response = fullres
         elif commands[0] == "ECHO":
             if len(commands) != 2:
                 response = b"-ERR wrong number of arguments for 'echo' command\r\n"
