@@ -36,6 +36,7 @@ def load_rdb_file(dir_path, filename, target_storage):
         if header[0:5] != b"REDIS":
             print(b"-ERR Invalid RDB file header\r\n")
             return
+        pending_expire_at = None
 
         idx = 9
         while True:
@@ -59,15 +60,29 @@ def load_rdb_file(dir_path, filename, target_storage):
             if opcode == 0xFF:
                 break
             if opcode == 0xFD:
+                if idx + 4 > len(raw):
+                    raise ValueError("unexpected end of RDB while reading EXPIRETIME")
+                expire_seconds = int.from_bytes(raw[idx:idx + 4], byteorder="little", signed=False)
+                pending_expire_at = datetime.fromtimestamp(expire_seconds)
                 idx += 4
                 continue
             if opcode == 0xFC:
+                if idx + 8 > len(raw):
+                    raise ValueError("unexpected end of RDB while reading EXPIRETIMEMS")
+                expire_milliseconds = int.from_bytes(raw[idx:idx + 8], byteorder="little", signed=False)
+                pending_expire_at = datetime.fromtimestamp(expire_milliseconds / 1000)
                 idx += 8
                 continue
             if opcode == 0x00:
                 key, idx = read_string(raw, idx)
                 value, idx = read_string(raw, idx)
+                if pending_expire_at is not None and datetime.now() >= pending_expire_at:
+                    pending_expire_at = None
+                    continue
                 target_storage[key] = value
+                if pending_expire_at is not None:
+                    expire_times[key] = pending_expire_at
+                pending_expire_at = None
                 continue
             raise ValueError(f"unsupported RDB opcode: {opcode}")
     return b"+OK\r\n"
@@ -1037,11 +1052,11 @@ def main():
     global pending_wait_requests
     pending_wait_requests = {}
 
+    global expire_times
+    expire_times = {}
     global storage
     storage = {}
     load_rdb_file(redis_config_dir, redis_config_dbfilename, storage)
-    global expire_times
-    expire_times = {}
     global blocked_clients_by_key
     blocked_clients_by_key = {}
     global blocked_client_deadline
