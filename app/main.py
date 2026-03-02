@@ -274,7 +274,7 @@ def handle_client(commands, client_socket=None):
                             if replica_ack_offsets.get(replica_socket, 0) >= target_offset
                         )
                         if replicas_acked >= num_replicas:
-                            response = f":{num_replicas}\r\n".encode()
+                            response = f":{replicas_acked}\r\n".encode()
                         else:
                             pending_wait_requests[client_socket] = {
                                 "target_replicas": num_replicas,
