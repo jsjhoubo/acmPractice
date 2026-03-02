@@ -240,6 +240,17 @@ def handle_client(commands, client_socket=None):
 
         if commands[0] == "PING":
             response = b"+PONG\r\n"
+        elif commands[0].upper() == "CONFIG":
+            if len(commands) != 3 or commands[1].upper() != "GET":
+                response = b"-ERR wrong number of arguments for 'config' command\r\n"
+            else:
+                config_key = commands[2].lower()
+                if config_key == "dir":
+                    response = encode_resp_array(["dir", redis_config_dir])
+                elif config_key == "dbfilename":
+                    response = encode_resp_array(["dbfilename", redis_config_dbfilename])
+                else:
+                    response = b"*0\r\n"
         elif commands[0] == "REPLCONF":
             if len(commands) != 3:
                 response = b"-ERR wrong number of arguments for 'replconf' command\r\n"
@@ -842,10 +853,20 @@ def main():
     role = "master"
     master_host = None
     master_port = None
+    config_dir = "."
+    config_dbfilename = "dump.rdb"
     if "--port" in sys.argv:
         port_arg_index = sys.argv.index("--port")
         if port_arg_index + 1 < len(sys.argv):
             port = int(sys.argv[port_arg_index + 1])
+    if "--dir" in sys.argv:
+        dir_arg_index = sys.argv.index("--dir")
+        if dir_arg_index + 1 < len(sys.argv):
+            config_dir = sys.argv[dir_arg_index + 1]
+    if "--dbfilename" in sys.argv:
+        dbfilename_arg_index = sys.argv.index("--dbfilename")
+        if dbfilename_arg_index + 1 < len(sys.argv):
+            config_dbfilename = sys.argv[dbfilename_arg_index + 1]
     if "--replicaof" in sys.argv:
         replicaof_arg_index = sys.argv.index("--replicaof")
         if replicaof_arg_index + 1 < len(sys.argv):
@@ -870,6 +891,10 @@ def main():
 
     global server_role
     server_role = role
+    global redis_config_dir
+    redis_config_dir = config_dir
+    global redis_config_dbfilename
+    redis_config_dbfilename = config_dbfilename
     global upstream_master_host
     upstream_master_host = master_host
     global upstream_master_port
