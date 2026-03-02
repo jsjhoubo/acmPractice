@@ -253,7 +253,7 @@ def handle_client(commands, client_socket=None):
                     if num_replicas < 0 or timeout_ms < 0:
                         response = b"-ERR invalid arguments for 'wait' command\r\n"
                     else:
-                        replicas_acked = min(num_replicas, len(replica_connections))
+                        replicas_acked = len(replica_connections)
                         response = f":{replicas_acked}\r\n".encode()
                 except ValueError:
                     response = b"-ERR invalid arguments for 'wait' command\r\n"
