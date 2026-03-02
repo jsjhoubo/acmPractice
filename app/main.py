@@ -212,10 +212,15 @@ def wake_blocked_clients_for_key(key: str, max_wake_count: int):
 
 
 def propagate_to_replicas(commands, source_client=None):
+    global master_repl_offset
     if not replica_connections:
         return
 
     encoded_command = encode_resp_array(commands)
+
+    master_repl_offset += len(encoded_command)
+    if source_client is not None:
+        client_last_write_offset[source_client] = master_repl_offset
     for replica_socket in list(replica_connections):
         if replica_socket is source_client:
             continue
@@ -241,6 +246,15 @@ def handle_client(commands, client_socket=None):
             else:
                 if commands[1].upper() == "GETACK" and commands[2] == "*":
                     response = b"*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$1\r\n0\r\n"
+                elif commands[1].upper() == "ACK":
+                    try:
+                        ack_offset = int(commands[2])
+                    except ValueError:
+                        response = b"-ERR invalid replconf ack offset\r\n"
+                    else:
+                        if client_socket is not None and client_socket in replica_connections:
+                            replica_ack_offsets[client_socket] = ack_offset
+                        response = None
                 else:
                     response = b"+OK\r\n"
         elif commands[0] == "WAIT":
@@ -253,8 +267,28 @@ def handle_client(commands, client_socket=None):
                     if num_replicas < 0 or timeout_ms < 0:
                         response = b"-ERR invalid arguments for 'wait' command\r\n"
                     else:
-                        replicas_acked = len(replica_connections)
-                        response = f":{replicas_acked}\r\n".encode()
+                        replicas_acked = min(num_replicas, len(replica_connections))
+                        target_offset  = client_last_write_offset.get(client_socket, master_repl_offset)
+                        replicas_acked = sum(
+                            1 for replica_socket in replica_connections
+                            if replica_ack_offsets.get(replica_socket, 0) >= target_offset
+                        )
+                        if replicas_acked >= num_replicas:
+                            response = f":{num_replicas}\r\n".encode()
+                        else:
+                            pending_wait_requests[client_socket] = {
+                                "target_replicas": num_replicas,
+                                "target_offset": target_offset,
+                                "deadline": datetime.now() + timedelta(milliseconds=timeout_ms),
+                            }
+                            getack = encode_resp_array(["REPLCONF", "GETACK", "*"])
+                            for replica_socket in list(replica_connections):
+                                if replica_socket not in send_queue:
+                                    continue
+                                send_queue[replica_socket].append(getack)
+                                if replica_socket not in outputs:
+                                    outputs.append(replica_socket)
+                            response = None
                 except ValueError:
                     response = b"-ERR invalid arguments for 'wait' command\r\n"
         elif commands[0] == "PSYNC":
@@ -266,6 +300,7 @@ def handle_client(commands, client_socket=None):
                 response = f"+FULLRESYNC {master_replid} {master_repl_offset}\r\n".encode()
                 if client_socket is not None:
                     replica_connections.add(client_socket)
+                    replica_ack_offsets[client_socket] = 0
                 empty_rdb_hex = (
                     "524544495330303132fa0972656469732d76657205372e342e38"
                     "fa0a72656469732d62697473c040fa056374696d65c2a111a169"
@@ -698,6 +733,7 @@ def close_client_socket(s, inputs, outputs, recv_buffer, send_queue):
 
     blocked_client_deadline.pop(s, None)
     replica_connections.discard(s)
+    replica_ack_offsets.pop(s, None)
     for clients in blocked_clients_by_key.values():
         if s in clients:
             clients.remove(s)
@@ -709,6 +745,8 @@ def close_client_socket(s, inputs, outputs, recv_buffer, send_queue):
         inputs.remove(s)
     recv_buffer.pop(s, None)
     send_queue.pop(s, None)
+    client_last_write_offset.pop(s, None)
+    pending_wait_requests.pop(s, None)
     s.close()
 
 
@@ -844,6 +882,11 @@ def main():
     master_repl_offset = 0
     global replica_repl_offset
     replica_repl_offset = 0
+    
+    global client_last_write_offset
+    client_last_write_offset = {}
+    global pending_wait_requests
+    pending_wait_requests = {}
 
     global storage
     storage = {}
@@ -857,6 +900,8 @@ def main():
     blocked_xread_requests = []
     global replica_connections
     replica_connections = set()
+    global replica_ack_offsets
+    replica_ack_offsets = {}
     global commands_queue
     commands_queue = []
     global transaction_queue
@@ -952,6 +997,13 @@ def main():
                     if client not in outputs:
                         outputs.append(client)
                     blocked_xread_requests.remove(request)
+            for wait_client, request in list(pending_wait_requests.items()):
+                acked_count = sum(1 for replica in replica_connections if replica_ack_offsets.get(replica, 0) >= request["target_offset"])
+                if acked_count >= request["target_replicas"] or datetime.now() >= request["deadline"]:
+                    send_queue[wait_client].append(f":{acked_count}\r\n".encode())
+                    if wait_client not in outputs:
+                        outputs.append(wait_client)
+                    pending_wait_requests.pop(wait_client, None)
             for s in readable:
                 if s is server_socket:
                     client_socket, _ = server_socket.accept()
