@@ -2,6 +2,7 @@ import select
 import socket  # noqa: F401
 import sys
 from datetime import datetime, timedelta
+import os
 
 socket_queue_size = 128
 socket_receive_buffer_size = 1024
@@ -22,6 +23,117 @@ class BlockedXReadRequest:
         self.deadline = deadline
         self.stream_keys = {stream_key for stream_key, _ in resolved_streams}
 
+def load_rdb_file(dir_path, filename, target_storage):
+    file_path = os.path.join(dir_path, filename)
+    if not os.path.exists(file_path):
+        return b"-ERR RDB file not found\r\n"
+    with open(file_path, "rb") as f:
+        raw = f.read()
+        if len(raw) < 9:
+            print(f"Loaded RDB bytes: {len(raw)}")
+            return
+        header = raw[0:9]
+        if header[0:5] != b"REDIS":
+            print(b"-ERR Invalid RDB file header\r\n")
+            return
+
+        idx = 9
+        while True:
+            if idx >= len(raw):
+                break
+
+            opcode = raw[idx]
+            idx += 1
+
+            if opcode == 0xFA:
+                _, idx = read_string(raw, idx)
+                _, idx = read_string(raw, idx)
+                continue
+            if opcode == 0xFE:
+                _, idx, _, _ = read_length(raw, idx)
+                continue
+            if opcode == 0xFB:
+                _, idx, _, _ = read_length(raw, idx)
+                _, idx, _, _ = read_length(raw, idx)
+                continue
+            if opcode == 0xFF:
+                break
+            if opcode == 0xFD:
+                idx += 4
+                continue
+            if opcode == 0xFC:
+                idx += 8
+                continue
+            if opcode == 0x00:
+                key, idx = read_string(raw, idx)
+                value, idx = read_string(raw, idx)
+                target_storage[key] = value
+                continue
+            raise ValueError(f"unsupported RDB opcode: {opcode}")
+    return b"+OK\r\n"
+
+
+def read_length(raw: bytes, idx: int):
+    if idx >= len(raw):
+        raise ValueError("unexpected end of RDB while reading length")
+
+    first_byte = raw[idx]
+    idx += 1
+    length_type = (first_byte & 0xC0) >> 6
+
+    if length_type == 0:
+        return first_byte & 0x3F, idx, False, None
+
+    if length_type == 1:
+        if idx >= len(raw):
+            raise ValueError("unexpected end of RDB while reading 14-bit length")
+        length = ((first_byte & 0x3F) << 8) | raw[idx]
+        idx += 1
+        return length, idx, False, None
+
+    if length_type == 2:
+        if idx + 4 > len(raw):
+            raise ValueError("unexpected end of RDB while reading 32-bit length")
+        length = int.from_bytes(raw[idx:idx + 4], byteorder="big", signed=False)
+        idx += 4
+        return length, idx, False, None
+
+    encoding_type = first_byte & 0x3F
+    return None, idx, True, encoding_type
+
+
+def read_string(raw: bytes, idx: int):
+    length, idx, is_encoded, encoding_type = read_length(raw, idx)
+
+    if not is_encoded:
+        if idx + length > len(raw):
+            raise ValueError("unexpected end of RDB while reading string")
+        value = raw[idx:idx + length].decode()
+        idx += length
+        return value, idx
+
+    if encoding_type == 0:
+        if idx + 1 > len(raw):
+            raise ValueError("unexpected end of RDB while reading int8")
+        value = int.from_bytes(raw[idx:idx + 1], byteorder="little", signed=True)
+        idx += 1
+        return str(value), idx
+
+    if encoding_type == 1:
+        if idx + 2 > len(raw):
+            raise ValueError("unexpected end of RDB while reading int16")
+        value = int.from_bytes(raw[idx:idx + 2], byteorder="little", signed=True)
+        idx += 2
+        return str(value), idx
+
+    if encoding_type == 2:
+        if idx + 4 > len(raw):
+            raise ValueError("unexpected end of RDB while reading int32")
+        value = int.from_bytes(raw[idx:idx + 4], byteorder="little", signed=True)
+        idx += 4
+        return str(value), idx
+
+    raise ValueError(f"unsupported encoded string format: {encoding_type}")
 
 def parse_stream_id(entry_id: str):
     parts = entry_id.split("-")
@@ -240,6 +352,18 @@ def handle_client(commands, client_socket=None):
 
         if commands[0] == "PING":
             response = b"+PONG\r\n"
+        elif commands[0] == "KEYS":
+            if len(commands) != 2:
+                response = b"-ERR wrong number of arguments for 'keys' command\r\n"
+            else:
+                pattern = commands[1]
+                if pattern == "*":
+                    matching_keys = list(storage.keys())
+                else:
+                    matching_keys = [key for key in storage.keys() if key == pattern]
+                response = f"*{len(matching_keys)}\r\n".encode()
+                for key in matching_keys:
+                    response += f"${len(key)}\r\n{key}\r\n".encode()
         elif commands[0].upper() == "CONFIG":
             if len(commands) != 3 or commands[1].upper() != "GET":
                 response = b"-ERR wrong number of arguments for 'config' command\r\n"
@@ -915,6 +1039,7 @@ def main():
 
     global storage
     storage = {}
+    load_rdb_file(redis_config_dir, redis_config_dbfilename, storage)
     global expire_times
     expire_times = {}
     global blocked_clients_by_key
