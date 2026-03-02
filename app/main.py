@@ -828,6 +828,8 @@ def main():
     master_replid = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb"
     global master_repl_offset
     master_repl_offset = 0
+    global replica_repl_offset
+    replica_repl_offset = 0
 
     global storage
     storage = {}
@@ -890,6 +892,7 @@ def main():
                         recv_buffer[master_connection] = remaining
                         break
 
+                    command_bytes_len = len(recv_buffer[master_connection]) - len(remaining)
                     recv_buffer[master_connection] = remaining
                     response = handle_client(commands, client_socket=master_connection)
                     is_getack_request = (
@@ -900,6 +903,9 @@ def main():
                     )
                     if not is_getack_request:
                         response = None
+                    else:
+                        response = encode_resp_array(["REPLCONF", "ACK", str(replica_repl_offset)])
+                    replica_repl_offset += command_bytes_len
 
                     if response is not None:
                         send_queue[master_connection].append(response)
@@ -951,6 +957,7 @@ def main():
                                     recv_buffer[s] = remaining
                                     break
 
+                                command_bytes_len = len(recv_buffer[s]) - len(remaining)
                                 recv_buffer[s] = remaining
                                 command_name = commands[0].upper()
                                 if s in transaction_queue and command_name not in ("MULTI", "EXEC", "DISCARD"):
@@ -970,6 +977,9 @@ def main():
                                         )
                                         if not is_getack_request:
                                             response = None
+                                        else:
+                                            response = encode_resp_array(["REPLCONF", "ACK", str(replica_repl_offset)])
+                                        replica_repl_offset += command_bytes_len
                                 if response is not None:
                                     send_queue[s].append(response)
                                     if s not in outputs:
