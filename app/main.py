@@ -243,6 +243,20 @@ def handle_client(commands, client_socket=None):
                     response = b"*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$1\r\n0\r\n"
                 else:
                     response = b"+OK\r\n"
+        elif commands[0] == "WAIT":
+            if len(commands) != 3:
+                response = b"-ERR wrong number of arguments for 'wait' command\r\n"
+            else:
+                try:
+                    num_replicas = int(commands[1])
+                    timeout_ms = int(commands[2])
+                    if num_replicas < 0 or timeout_ms < 0:
+                        response = b"-ERR invalid arguments for 'wait' command\r\n"
+                    else:
+                        replicas_acked = min(num_replicas, len(replica_connections))
+                        response = f":{replicas_acked}\r\n".encode()
+                except ValueError:
+                    response = b"-ERR invalid arguments for 'wait' command\r\n"
         elif commands[0] == "PSYNC":
             if len(commands) != 3:
                 response = b"-ERR wrong number of arguments for 'psync' command\r\n"
