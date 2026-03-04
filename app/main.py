@@ -23,68 +23,73 @@ class BlockedXReadRequest:
         self.deadline = deadline
         self.stream_keys = {stream_key for stream_key, _ in resolved_streams}
 
+
+def load_rdb_bytes(raw, target_storage, target_expire_times):
+    if len(raw) < 9:
+        print(f"Loaded RDB bytes: {len(raw)}")
+        return
+
+    header = raw[0:9]
+    if header[0:5] != b"REDIS":
+        print(b"-ERR Invalid RDB file header\r\n")
+        return
+
+    pending_expire_at = None
+    idx = 9
+    while True:
+        if idx >= len(raw):
+            break
+
+        opcode = raw[idx]
+        idx += 1
+
+        if opcode == 0xFA:
+            _, idx = read_string(raw, idx)
+            _, idx = read_string(raw, idx)
+            continue
+        if opcode == 0xFE:
+            _, idx, _, _ = read_length(raw, idx)
+            continue
+        if opcode == 0xFB:
+            _, idx, _, _ = read_length(raw, idx)
+            _, idx, _, _ = read_length(raw, idx)
+            continue
+        if opcode == 0xFF:
+            break
+        if opcode == 0xFD:
+            if idx + 4 > len(raw):
+                raise ValueError("unexpected end of RDB while reading EXPIRETIME")
+            expire_seconds = int.from_bytes(raw[idx:idx + 4], byteorder="little", signed=False)
+            pending_expire_at = datetime.fromtimestamp(expire_seconds)
+            idx += 4
+            continue
+        if opcode == 0xFC:
+            if idx + 8 > len(raw):
+                raise ValueError("unexpected end of RDB while reading EXPIRETIMEMS")
+            expire_milliseconds = int.from_bytes(raw[idx:idx + 8], byteorder="little", signed=False)
+            pending_expire_at = datetime.fromtimestamp(expire_milliseconds / 1000)
+            idx += 8
+            continue
+        if opcode == 0x00:
+            key, idx = read_string(raw, idx)
+            value, idx = read_string(raw, idx)
+            if pending_expire_at is not None and datetime.now() >= pending_expire_at:
+                pending_expire_at = None
+                continue
+            target_storage[key] = value
+            if pending_expire_at is not None:
+                target_expire_times[key] = pending_expire_at
+            pending_expire_at = None
+            continue
+        raise ValueError(f"unsupported RDB opcode: {opcode}")
+
 def load_rdb_file(dir_path, filename, target_storage):
     file_path = os.path.join(dir_path, filename)
     if not os.path.exists(file_path):
         return b"-ERR RDB file not found\r\n"
     with open(file_path, "rb") as f:
         raw = f.read()
-        if len(raw) < 9:
-            print(f"Loaded RDB bytes: {len(raw)}")
-            return
-        header = raw[0:9]
-        if header[0:5] != b"REDIS":
-            print(b"-ERR Invalid RDB file header\r\n")
-            return
-        pending_expire_at = None
-
-        idx = 9
-        while True:
-            if idx >= len(raw):
-                break
-
-            opcode = raw[idx]
-            idx += 1
-
-            if opcode == 0xFA:
-                _, idx = read_string(raw, idx)
-                _, idx = read_string(raw, idx)
-                continue
-            if opcode == 0xFE:
-                _, idx, _, _ = read_length(raw, idx)
-                continue
-            if opcode == 0xFB:
-                _, idx, _, _ = read_length(raw, idx)
-                _, idx, _, _ = read_length(raw, idx)
-                continue
-            if opcode == 0xFF:
-                break
-            if opcode == 0xFD:
-                if idx + 4 > len(raw):
-                    raise ValueError("unexpected end of RDB while reading EXPIRETIME")
-                expire_seconds = int.from_bytes(raw[idx:idx + 4], byteorder="little", signed=False)
-                pending_expire_at = datetime.fromtimestamp(expire_seconds)
-                idx += 4
-                continue
-            if opcode == 0xFC:
-                if idx + 8 > len(raw):
-                    raise ValueError("unexpected end of RDB while reading EXPIRETIMEMS")
-                expire_milliseconds = int.from_bytes(raw[idx:idx + 8], byteorder="little", signed=False)
-                pending_expire_at = datetime.fromtimestamp(expire_milliseconds / 1000)
-                idx += 8
-                continue
-            if opcode == 0x00:
-                key, idx = read_string(raw, idx)
-                value, idx = read_string(raw, idx)
-                if pending_expire_at is not None and datetime.now() >= pending_expire_at:
-                    pending_expire_at = None
-                    continue
-                target_storage[key] = value
-                if pending_expire_at is not None:
-                    expire_times[key] = pending_expire_at
-                pending_expire_at = None
-                continue
-            raise ValueError(f"unsupported RDB opcode: {opcode}")
+        load_rdb_bytes(raw, target_storage, expire_times)
     return b"+OK\r\n"
 
 
@@ -512,6 +517,7 @@ def handle_client(commands, client_socket=None):
                 if value is None:
                     value = "1"
                     storage[key] = value
+                    propagate_to_replicas(commands, source_client=client_socket)
                     response = b":1\r\n"
                 else:
                     try:
@@ -520,6 +526,7 @@ def handle_client(commands, client_socket=None):
                         response = b"-ERR value is not an integer or out of range\r\n"
                     else:
                         storage[key] = str(incremented_value)
+                        propagate_to_replicas(commands, source_client=client_socket)
                         response = f":{incremented_value}\r\n".encode()
         elif commands[0] == "RPUSH":
             key = commands[1]
@@ -530,6 +537,7 @@ def handle_client(commands, client_socket=None):
                 return response
             for value in commands[2:]:
                 storage[key].append(value)
+            propagate_to_replicas(commands, source_client=client_socket)
             pushed_length = len(storage[key])
             wake_blocked_clients_for_key(key, len(commands) - 2)
             response = f":{pushed_length}\r\n".encode()
@@ -542,6 +550,7 @@ def handle_client(commands, client_socket=None):
                 return response
             for value in commands[2:]:
                 storage[key].insert(0, value)
+            propagate_to_replicas(commands, source_client=client_socket)
             pushed_length = len(storage[key])
             wake_blocked_clients_for_key(key, len(commands) - 2)
             response = f":{pushed_length}\r\n".encode()
@@ -580,6 +589,7 @@ def handle_client(commands, client_socket=None):
                     else:
                         items_to_pop = min(count, len(storage[key]))
                         values = [storage[key].pop(0) for _ in range(items_to_pop)]
+                        propagate_to_replicas(commands, source_client=client_socket)
                         response = f"*{len(values)}\r\n".encode()
                         for value in values:
                             response += f"${len(value)}\r\n{value}\r\n".encode()
@@ -587,6 +597,7 @@ def handle_client(commands, client_socket=None):
                     response = b"-ERR invalid count\r\n"
             else:
                 value = storage[key].pop(0)
+                propagate_to_replicas(commands, source_client=client_socket)
                 response = f"${len(value)}\r\n{value}\r\n".encode()
         elif commands[0] == "BLPOP":
             key = commands[1]
@@ -728,6 +739,7 @@ def handle_client(commands, client_socket=None):
                     return response
 
             storage[key].entries.append((entry_id, fields))
+            propagate_to_replicas(commands, source_client=client_socket)
             wake_blocked_xread_clients_for_stream(key)
             response = f"${len(entry_id)}\r\n{entry_id}\r\n".encode()
         elif commands[0] == "XRANGE":
@@ -979,7 +991,10 @@ def send_replica_ping(master_host: str, master_port: int, listening_port: int):
             master_socket.close()
             return None, b""
 
-        read_exact_from_master(rdb_length)
+        rdb_payload = read_exact_from_master(rdb_length)
+        storage.clear()
+        expire_times.clear()
+        load_rdb_bytes(rdb_payload, storage, expire_times)
     except (ConnectionError, OSError, ValueError) as error:
         print(f"Unexpected response from master: {error}")
         master_socket.close()
