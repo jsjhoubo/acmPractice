@@ -372,6 +372,18 @@ def handle_client(commands, client_socket=None):
 
         if commands[0] == "PING":
             response = b"+PONG\r\n"
+        elif commands[0] == "SUBSCRIBE":
+            if len(commands) < 2:
+                response = b"-ERR wrong number of arguments for 'subscribe' command\r\n"
+            else:
+                for channel in commands[1:]:
+                    if channel not in subscriptions:
+                        subscriptions[channel] = set()
+                    subscriptions[channel].add(client_socket)
+                response = b"".join(
+                    f"*3\r\n$9\r\nsubscribe\r\n${len(channel)}\r\n{channel}\r\n:1\r\n".encode()
+                    for channel in commands[1:]
+                )
         elif commands[0] == "KEYS":
             if len(commands) != 2:
                 response = b"-ERR wrong number of arguments for 'keys' command\r\n"
@@ -1061,6 +1073,8 @@ def main():
     master_repl_offset = 0
     global replica_repl_offset
     replica_repl_offset = 0
+    global subscriptions
+    subscriptions = {}
     
     global client_last_write_offset
     client_last_write_offset = {}
