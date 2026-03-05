@@ -1066,6 +1066,21 @@ def handle_client(commands, client_socket=None):
                     response = b"$-1\r\n"
                 else:
                     response = f":{rank}\r\n".encode()
+        elif command_name == "ZRANGE":
+            key = commands[1]
+            start = int(commands[2])
+            end = int(commands[3])
+            withscores = len(commands) > 4 and commands[4].upper() == "WITHSCORES"
+            if key not in storage or not isinstance(storage[key], RedisSortedSet):
+                response = b"*0\r\n"
+            else:
+                members = storage[key].range(start, end)
+                response = f"*{len(members)}\r\n".encode()
+                for member, score in members:
+                    response += f"${len(member)}\r\n{member}\r\n".encode()
+                    if withscores:
+                        score_str = str(score)
+                        response += f"${len(score_str)}\r\n{score_str}\r\n".encode()
         elif command_name == "INFO":
             if len(commands) == 1:
                 role_for_info = "slave" if upstream_master_host is not None else "master"
