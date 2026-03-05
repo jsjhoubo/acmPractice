@@ -1246,6 +1246,27 @@ def handle_client(commands, client_socket=None):
                 propagate_to_replicas(commands, source_client=client_socket)
                 append_to_aof(commands)
                 response = f":{added_members}\r\n".encode()
+        elif command_name == "GEOPOS":
+            if len(commands) != 4:
+                response = b"-ERR wrong number of arguments for 'geopos' command\r\n"
+            else:
+                key = commands[1]
+                member = commands[2]
+                if key not in storage or not isinstance(storage[key], RedisSortedSet):
+                    response = b"$-1\r\n"
+                else:
+                    score = storage[key].score(member)
+                    if score is None:
+                        response = b"$-1\r\n"
+                    else:
+                        longitude, latitude = decode_geohash(score)
+                        longitude_str = str(longitude)
+                        latitude_str = str(latitude)
+                        response = (
+                            f"*2\r\n"
+                            f"${len(longitude_str)}\r\n{longitude_str}\r\n"
+                            f"${len(latitude_str)}\r\n{latitude_str}\r\n"
+                        ).encode()
         elif command_name == "INFO":
             if len(commands) == 1:
                 role_for_info = "slave" if upstream_master_host is not None else "master"
