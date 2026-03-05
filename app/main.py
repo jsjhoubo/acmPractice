@@ -1632,8 +1632,11 @@ def handle_client(commands, client_socket=None):
                     response = f"*{len(matching_members)}\r\n".encode()
                     for member in matching_members:
                         response += f"${len(member)}\r\n{member}\r\n".encode()
-        elif command_name == "ACL WHOAMI":
-            response = b"+default\r\n"
+        elif command_name == "ACL":
+            if len(commands) == 2 and commands[1].upper() == "WHOAMI":
+                response = b"$7\r\ndefault\r\n"
+            else:
+                response = b"-ERR syntax error\r\n"
         elif command_name == "INFO":
             if len(commands) == 1:
                 role_for_info = "slave" if get_replication_role() == "replica" else "master"
