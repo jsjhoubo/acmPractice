@@ -660,6 +660,16 @@ def spread_int32_to_int64(value: int):
     return result
 
 
+def compact_int64_to_int32(value: int):
+    result = value & 0x5555555555555555
+    result = (result | (result >> 1)) & 0x3333333333333333
+    result = (result | (result >> 2)) & 0x0F0F0F0F0F0F0F0F
+    result = (result | (result >> 4)) & 0x00FF00FF00FF00FF
+    result = (result | (result >> 8)) & 0x0000FFFF0000FFFF
+    result = (result | (result >> 16)) & 0x00000000FFFFFFFF
+    return int(result)
+
+
 def encode_geohash(longitude: float, latitude: float):
     if not (GEO_MIN_LONGITUDE <= longitude <= GEO_MAX_LONGITUDE):
         raise ValueError("longitude out of range [-180, 180]")
@@ -675,6 +685,22 @@ def encode_geohash(longitude: float, latitude: float):
     spread_lat = spread_int32_to_int64(lat_int)
     spread_lon = spread_int32_to_int64(lon_int)
     return spread_lat | (spread_lon << 1)
+
+
+def decode_geohash(score: int):
+    grid_latitude_number = compact_int64_to_int32(score)
+    grid_longitude_number = compact_int64_to_int32(score >> 1)
+
+    divisor = float(2**26)
+
+    grid_latitude_min = GEO_MIN_LATITUDE + GEO_LATITUDE_RANGE * (grid_latitude_number / divisor)
+    grid_latitude_max = GEO_MIN_LATITUDE + GEO_LATITUDE_RANGE * ((grid_latitude_number + 1) / divisor)
+    grid_longitude_min = GEO_MIN_LONGITUDE + GEO_LONGITUDE_RANGE * (grid_longitude_number / divisor)
+    grid_longitude_max = GEO_MIN_LONGITUDE + GEO_LONGITUDE_RANGE * ((grid_longitude_number + 1) / divisor)
+
+    latitude = (grid_latitude_min + grid_latitude_max) / 2.0
+    longitude = (grid_longitude_min + grid_longitude_max) / 2.0
+    return longitude, latitude
 
 def wake_blocked_clients_for_key(key: str, max_wake_count: int):
     if key not in blocked_clients_by_key:
@@ -748,6 +774,179 @@ def encode_subscription_error(command_name: str):
     return (
         f"-ERR Can't execute '{command_name.lower()}' in subscribed mode\r\n"
     ).encode()
+
+
+def promote_to_master(reason: str):
+    global server_role
+    global upstream_master_host
+    global upstream_master_port
+    global upstream_connected
+    global last_failover_reason
+    global last_failover_at
+    global failover_term
+    global parent_node_id
+    global election_voted_term
+    global election_voted_for
+
+    if upstream_master_host is None:
+        return False
+
+    server_role = "master"
+    upstream_master_host = None
+    upstream_master_port = None
+    upstream_connected = False
+    failover_term += 1
+    election_voted_term = 0
+    election_voted_for = None
+    parent_node_id = None
+    last_failover_reason = reason
+    last_failover_at = datetime.now()
+    print(f"Auto failover promoted replica to master: {reason}")
+    return True
+
+
+def parse_peer_endpoint(peer: str):
+    if ":" not in peer:
+        return None
+    host, port_text = peer.split(":", 1)
+    if not host:
+        return None
+    try:
+        parsed_port = int(port_text)
+    except ValueError:
+        return None
+    if parsed_port <= 0:
+        return None
+    return host, parsed_port
+
+
+def request_vote_from_peer(peer_host: str, peer_port: int, term: int, candidate_id: str):
+    vote_socket = None
+    try:
+        vote_socket = socket.create_connection((peer_host, peer_port), timeout=0.5)
+        vote_socket.sendall(
+            encode_resp_array(["FAILOVER", "VOTE", str(term), candidate_id])
+        )
+
+        response = b""
+        while b"\r\n" not in response:
+            chunk = vote_socket.recv(socket_receive_buffer_size)
+            if not chunk:
+                break
+            response += chunk
+        return response.startswith(b"+YES\r\n")
+    except OSError:
+        return False
+    finally:
+        if vote_socket is not None:
+            vote_socket.close()
+
+
+def attempt_failover_election(reason: str):
+    global failover_term
+    global election_voted_term
+    global election_voted_for
+    global last_election_term
+    global last_election_votes
+    global last_failover_reason
+    global last_failover_at
+
+    if upstream_master_host is None:
+        return False
+
+    election_term = failover_term + 1
+    failover_term = election_term
+    election_voted_term = election_term
+    election_voted_for = node_id
+
+    votes = 1
+    for peer_host, peer_port in failover_peer_nodes:
+        if request_vote_from_peer(peer_host, peer_port, election_term, node_id):
+            votes += 1
+
+    last_election_term = election_term
+    last_election_votes = votes
+
+    if votes >= failover_quorum:
+        failover_term = election_term - 1
+        return promote_to_master(
+            f"{reason}; election term={election_term} votes={votes}/{failover_quorum}"
+        )
+
+    last_failover_reason = (
+        f"election failed: term={election_term} votes={votes}/{failover_quorum}"
+    )
+    last_failover_at = datetime.now()
+    return False
+
+
+def get_replication_role():
+    # Role relative to the upstream link.
+    return "replica" if upstream_master_host is not None else "primary"
+
+
+def get_serving_role():
+    # Role relative to downstream replicas.
+    has_downstream = len(replica_connections) > 0
+    if get_replication_role() == "replica":
+        return "relay" if has_downstream else "leaf"
+    return "source" if has_downstream else "standalone"
+
+
+def format_failover_info():
+    replication_role = get_replication_role()
+    serving_role = get_serving_role()
+    legacy_role = "slave" if replication_role == "replica" else "master"
+    mode_text = "enabled" if auto_failover_enabled else "disabled"
+    timeout_text = str(failover_timeout_ms)
+    reason_text = last_failover_reason if last_failover_reason else "none"
+    at_text = last_failover_at.isoformat() if last_failover_at is not None else "never"
+    return {
+        "node_id": node_id,
+        "term": str(failover_term),
+        "parent_node_id": parent_node_id if parent_node_id else "none",
+        "quorum": str(failover_quorum),
+        "known_peers": str(len(failover_peer_nodes)),
+        "last_election_term": str(last_election_term),
+        "last_election_votes": str(last_election_votes),
+        "role": legacy_role,
+        "replication_role": replication_role,
+        "serving_role": serving_role,
+        "mode": mode_text,
+        "timeout_ms": timeout_text,
+        "last_reason": reason_text,
+        "last_at": at_text,
+    }
+
+
+def request_replicaof_change(host: str | None, port: int | None):
+    global pending_replicaof_target
+    pending_replicaof_target = (host, port)
+
+
+def maybe_grant_vote(requested_term: int, candidate_id: str):
+    global failover_term
+    global election_voted_term
+    global election_voted_for
+
+    if requested_term < failover_term:
+        return False, "stale term"
+
+    if requested_term > failover_term:
+        failover_term = requested_term
+        election_voted_term = 0
+        election_voted_for = None
+
+    if (
+        election_voted_term == requested_term
+        and election_voted_for is not None
+        and election_voted_for != candidate_id
+    ):
+        return False, "already voted"
+
+    election_voted_term = requested_term
+    election_voted_for = candidate_id
+    return True, "granted"
 
 
 def handle_client(commands, client_socket=None):
@@ -851,6 +1050,20 @@ def handle_client(commands, client_socket=None):
                     response = encode_resp_array(["dbfilename", redis_config_dbfilename])
                 else:
                     response = b"*0\r\n"
+        elif command_name == "REPLICAOF":
+            if len(commands) != 3:
+                response = b"-ERR wrong number of arguments for 'replicaof' command\r\n"
+            elif commands[1].upper() == "NO" and commands[2].upper() == "ONE":
+                request_replicaof_change(None, None)
+                response = b"+OK\r\n"
+            else:
+                try:
+                    target_port = int(commands[2])
+                except ValueError:
+                    response = b"-ERR invalid master port for 'replicaof' command\r\n"
+                else:
+                    request_replicaof_change(commands[1], target_port)
+                    response = b"+OK\r\n"
         elif command_name == "REPLCONF":
             if len(commands) != 3:
                 response = b"-ERR wrong number of arguments for 'replconf' command\r\n"
@@ -1247,29 +1460,33 @@ def handle_client(commands, client_socket=None):
                 append_to_aof(commands)
                 response = f":{added_members}\r\n".encode()
         elif command_name == "GEOPOS":
-            if len(commands) != 4:
+            if len(commands) < 3:
                 response = b"-ERR wrong number of arguments for 'geopos' command\r\n"
             else:
                 key = commands[1]
-                member = commands[2]
+                members = commands[2:]
+                response = f"*{len(members)}\r\n".encode()
+
                 if key not in storage or not isinstance(storage[key], RedisSortedSet):
-                    response = b"$-1\r\n"
+                    response += b"*-1\r\n" * len(members)
                 else:
-                    score = storage[key].score(member)
-                    if score is None:
-                        response = b"$-1\r\n"
-                    else:
-                        longitude, latitude = decode_geohash(score)
+                    for member in members:
+                        score = storage[key].score(member)
+                        if score is None:
+                            response += b"*-1\r\n"
+                            continue
+
+                        longitude, latitude = decode_geohash(int(score))
                         longitude_str = str(longitude)
                         latitude_str = str(latitude)
-                        response = (
+                        response += (
                             f"*2\r\n"
                             f"${len(longitude_str)}\r\n{longitude_str}\r\n"
                             f"${len(latitude_str)}\r\n{latitude_str}\r\n"
                         ).encode()
         elif command_name == "INFO":
             if len(commands) == 1:
-                role_for_info = "slave" if upstream_master_host is not None else "master"
+                role_for_info = "slave" if get_replication_role() == "replica" else "master"
                 info_lines = [
                     f"role:{role_for_info}",
                     f"master_replid:{master_replid}",
@@ -1287,7 +1504,7 @@ def handle_client(commands, client_socket=None):
                 info_content = "\r\n".join(info_lines)
                 response = f"${len(info_content)}\r\n{info_content}\r\n".encode()
             elif len(commands) == 2 and commands[1].lower() == "replication":
-                role_for_info = "slave" if upstream_master_host is not None else "master"
+                role_for_info = "slave" if get_replication_role() == "replica" else "master"
                 info_lines = [
                     f"role:{role_for_info}",
                     f"master_replid:{master_replid}",
@@ -1306,6 +1523,58 @@ def handle_client(commands, client_socket=None):
                 response = f"${len(info_content)}\r\n{info_content}\r\n".encode()
             else:
                 response = b"$0\r\n\r\n"
+        elif command_name == "FAILOVER":
+            if len(commands) < 2:
+                response = b"-ERR wrong number of arguments for 'failover' command\r\n"
+            else:
+                subcommand = commands[1].upper()
+                if subcommand == "STATUS" and len(commands) == 2:
+                    failover_info = format_failover_info()
+                    payload = "\r\n".join(
+                        [
+                            f"node_id:{failover_info['node_id']}",
+                            f"failover_term:{failover_info['term']}",
+                            f"parent_node_id:{failover_info['parent_node_id']}",
+                            f"failover_quorum:{failover_info['quorum']}",
+                            f"failover_known_peers:{failover_info['known_peers']}",
+                            f"failover_last_election_term:{failover_info['last_election_term']}",
+                            f"failover_last_election_votes:{failover_info['last_election_votes']}",
+                            f"role:{failover_info['role']}",
+                            f"replication_role:{failover_info['replication_role']}",
+                            f"serving_role:{failover_info['serving_role']}",
+                            f"failover_mode:{failover_info['mode']}",
+                            f"failover_timeout_ms:{failover_info['timeout_ms']}",
+                            f"failover_last_reason:{failover_info['last_reason']}",
+                            f"failover_last_at:{failover_info['last_at']}",
+                        ]
+                    )
+                    response = f"${len(payload)}\r\n{payload}\r\n".encode()
+                elif subcommand == "FORCE" and len(commands) == 2:
+                    promoted = promote_to_master("manual FORCE")
+                    if promoted:
+                        response = b"+OK\r\n"
+                    else:
+                        response = b"-ERR FAILOVER FORCE only valid on replica\r\n"
+                elif subcommand == "ELECT" and len(commands) == 2:
+                    promoted = attempt_failover_election("manual ELECT")
+                    if promoted:
+                        response = b"+OK\r\n"
+                    else:
+                        response = b"-ERR election did not reach quorum\r\n"
+                elif subcommand == "VOTE" and len(commands) == 4:
+                    try:
+                        requested_term = int(commands[2])
+                    except ValueError:
+                        response = b"-ERR invalid election term\r\n"
+                    else:
+                        candidate_id = commands[3]
+                        granted, vote_reason = maybe_grant_vote(requested_term, candidate_id)
+                        if granted:
+                            response = b"+YES\r\n"
+                        else:
+                            response = f"+NO {vote_reason}\r\n".encode()
+                else:
+                    response = b"-ERR syntax error\r\n"
         elif command_name == "XADD":
             if len(commands) < 5 or len(commands[3:]) % 2 != 0:
                 response = b"-ERR wrong number of arguments for 'xadd' command\r\n"
@@ -1556,6 +1825,7 @@ def encode_resp_array(parts):
 def send_replica_ping(master_host: str, master_port: int, listening_port: int):
     master_socket = socket.create_connection((master_host, master_port), timeout=socket_timeout)
     handshake_buffer = b""
+    upstream_node_id = None
 
     def read_line_from_master():
         nonlocal handshake_buffer
@@ -1589,40 +1859,43 @@ def send_replica_ping(master_host: str, master_port: int, listening_port: int):
         if ping_response != b"+PONG":
             print(f"Unexpected response from master: {ping_response.decode(errors='replace')}")
             master_socket.close()
-            return None, b""
+            return None, b"", None
 
         master_socket.sendall(encode_resp_array(["REPLCONF", "listening-port", str(listening_port)]))
         replconf_port_response = read_line_from_master()
         if replconf_port_response != b"+OK":
             print(f"Unexpected response from master: {replconf_port_response.decode(errors='replace')}")
             master_socket.close()
-            return None, b""
+            return None, b"", None
 
         master_socket.sendall(encode_resp_array(["REPLCONF", "capa", "psync2"]))
         replconf_capa_response = read_line_from_master()
         if replconf_capa_response != b"+OK":
             print(f"Unexpected response from master: {replconf_capa_response.decode(errors='replace')}")
             master_socket.close()
-            return None, b""
+            return None, b"", None
 
         master_socket.sendall(encode_resp_array(["PSYNC", "?", "-1"]))
         psync_response = read_line_from_master()
         if not psync_response.startswith(b"+FULLRESYNC"):
             print(f"Unexpected response from master: {psync_response.decode(errors='replace')}")
             master_socket.close()
-            return None, b""
+            return None, b"", None
+        psync_parts = psync_response.decode(errors="replace").split()
+        if len(psync_parts) >= 2:
+            upstream_node_id = psync_parts[1]
 
         rdb_header = read_line_from_master()
         if not rdb_header.startswith(b"$"):
             print(f"Unexpected RDB header from master: {rdb_header.decode(errors='replace')}")
             master_socket.close()
-            return None, b""
+            return None, b"", None
 
         rdb_length = int(rdb_header[1:])
         if rdb_length < 0:
             print("Unexpected negative RDB length from master")
             master_socket.close()
-            return None, b""
+            return None, b"", None
 
         rdb_payload = read_exact_from_master(rdb_length)
         storage.clear()
@@ -1631,9 +1904,9 @@ def send_replica_ping(master_host: str, master_port: int, listening_port: int):
     except (ConnectionError, OSError, ValueError) as error:
         print(f"Unexpected response from master: {error}")
         master_socket.close()
-        return None, b""
+        return None, b"", None
 
-    return master_socket, handshake_buffer
+    return master_socket, handshake_buffer, upstream_node_id
 
 def main():
     port = 6379
@@ -1645,6 +1918,10 @@ def main():
     appendonly = False
     appendfilename = "appendonly.aof"
     appendfsync = "everysec"
+    auto_failover = False
+    failover_timeout_ms_config = 10000
+    failover_quorum_config = 1
+    failover_peers_config = []
     save_rules = list(rdb_save_rules_default)
     bgsave_reap_mode = os.environ.get(
         "REDIS_BGSAVE_REAP_MODE",
@@ -1696,6 +1973,63 @@ def main():
             bgsave_reap_mode = sys.argv[mode_arg_index + 1].lower()
         else:
             print("Usage: --bgsave-reap-mode <poll|sigchld>")
+            return
+
+    if "--auto-failover" in sys.argv:
+        auto_failover_arg_index = sys.argv.index("--auto-failover")
+        if auto_failover_arg_index + 1 < len(sys.argv):
+            auto_failover_value = sys.argv[auto_failover_arg_index + 1].lower()
+            if auto_failover_value not in {"yes", "no"}:
+                print("Usage: --auto-failover <yes|no>")
+                return
+            auto_failover = auto_failover_value == "yes"
+        else:
+            print("Usage: --auto-failover <yes|no>")
+            return
+
+    if "--failover-timeout-ms" in sys.argv:
+        failover_timeout_arg_index = sys.argv.index("--failover-timeout-ms")
+        if failover_timeout_arg_index + 1 < len(sys.argv):
+            try:
+                failover_timeout_ms_config = int(sys.argv[failover_timeout_arg_index + 1])
+            except ValueError:
+                print("Usage: --failover-timeout-ms <positive-integer>")
+                return
+            if failover_timeout_ms_config <= 0:
+                print("Usage: --failover-timeout-ms <positive-integer>")
+                return
+        else:
+            print("Usage: --failover-timeout-ms <positive-integer>")
+            return
+
+    if "--failover-quorum" in sys.argv:
+        failover_quorum_arg_index = sys.argv.index("--failover-quorum")
+        if failover_quorum_arg_index + 1 < len(sys.argv):
+            try:
+                failover_quorum_config = int(sys.argv[failover_quorum_arg_index + 1])
+            except ValueError:
+                print("Usage: --failover-quorum <positive-integer>")
+                return
+            if failover_quorum_config <= 0:
+                print("Usage: --failover-quorum <positive-integer>")
+                return
+        else:
+            print("Usage: --failover-quorum <positive-integer>")
+            return
+
+    if "--failover-peers" in sys.argv:
+        failover_peers_arg_index = sys.argv.index("--failover-peers")
+        if failover_peers_arg_index + 1 < len(sys.argv):
+            peers_raw = sys.argv[failover_peers_arg_index + 1].strip()
+            if peers_raw:
+                for peer_token in peers_raw.split(","):
+                    peer = parse_peer_endpoint(peer_token.strip())
+                    if peer is None:
+                        print("Usage: --failover-peers <host1:port1,host2:port2,...>")
+                        return
+                    failover_peers_config.append(peer)
+        else:
+            print("Usage: --failover-peers <host1:port1,host2:port2,...>")
             return
 
     if bgsave_reap_mode not in {"poll", "sigchld"}:
@@ -1757,6 +2091,40 @@ def main():
     upstream_master_port = master_port
     global upstream_connected
     upstream_connected = False
+    global auto_failover_enabled
+    auto_failover_enabled = auto_failover
+    global failover_timeout_ms
+    failover_timeout_ms = failover_timeout_ms_config
+    global last_master_activity_at
+    last_master_activity_at = datetime.now()
+    global last_failover_reason
+    last_failover_reason = ""
+    global last_failover_at
+    last_failover_at = None
+    global failover_term
+    failover_term = 0
+    global node_id
+    node_id = f"node-{port}-{os.getpid()}"
+    global parent_node_id
+    parent_node_id = None
+    global pending_replicaof_target
+    pending_replicaof_target = None
+    global failover_quorum
+    failover_quorum = failover_quorum_config
+    global failover_peer_nodes
+    failover_peer_nodes = [
+        (host, peer_port)
+        for host, peer_port in failover_peers_config
+        if not (host in {"127.0.0.1", "localhost"} and peer_port == port)
+    ]
+    global election_voted_term
+    election_voted_term = 0
+    global election_voted_for
+    election_voted_for = None
+    global last_election_term
+    last_election_term = 0
+    global last_election_votes
+    last_election_votes = 0
     global master_replid
     master_replid = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb"
     global master_repl_offset
@@ -1838,12 +2206,15 @@ def main():
     inputs = [server_socket]
     master_connection = None
     master_initial_buffer = b""
+    upstream_node_id = None
     if server_role == "slave" and master_host is not None and master_port is not None:
-        master_connection, master_initial_buffer = send_replica_ping(master_host, master_port, port)
+        master_connection, master_initial_buffer, upstream_node_id = send_replica_ping(master_host, master_port, port)
         if master_connection is None:
             print("Failed to communicate with master, exiting.")
             return
         upstream_connected = True
+        parent_node_id = upstream_node_id
+        last_master_activity_at = datetime.now()
         master_connection.setblocking(False)
         inputs.append(master_connection)
 
@@ -1862,39 +2233,95 @@ def main():
         if s in outputs and (s not in send_queue or not send_queue[s]):
             outputs.remove(s)
 
+    def process_master_input_buffer(connection_socket):
+        global replica_repl_offset
+
+        if connection_socket not in recv_buffer:
+            return
+        try:
+            while True:
+                commands, remaining = parse_resp_from_buffer(recv_buffer[connection_socket])
+                if commands is None:
+                    recv_buffer[connection_socket] = remaining
+                    break
+
+                command_bytes_len = len(recv_buffer[connection_socket]) - len(remaining)
+                recv_buffer[connection_socket] = remaining
+                response = handle_client(commands, client_socket=connection_socket)
+                is_getack_request = (
+                    len(commands) == 3
+                    and commands[0].upper() == "REPLCONF"
+                    and commands[1].upper() == "GETACK"
+                    and commands[2] == "*"
+                )
+                if not is_getack_request:
+                    response = None
+                else:
+                    response = encode_resp_array(["REPLCONF", "ACK", str(replica_repl_offset)])
+                replica_repl_offset += command_bytes_len
+
+                if response is not None:
+                    send_queue[connection_socket].append(response)
+                    if connection_socket not in outputs:
+                        outputs.append(connection_socket)
+                    flush_send_queue_for_socket(connection_socket)
+        except ValueError:
+            recv_buffer[connection_socket] = b""
+
+    def apply_pending_replicaof_change():
+        nonlocal master_connection
+        global server_role
+        global upstream_master_host
+        global upstream_master_port
+        global upstream_connected
+        global parent_node_id
+        global pending_replicaof_target
+        global last_master_activity_at
+
+        if pending_replicaof_target is None:
+            return
+
+        target_host, target_port = pending_replicaof_target
+        pending_replicaof_target = None
+
+        if master_connection is not None:
+            close_client_socket(master_connection, inputs, outputs, recv_buffer, send_queue)
+            master_connection = None
+
+        if target_host is None or target_port is None:
+            promote_to_master("REPLICAOF NO ONE")
+            return
+
+        server_role = "slave"
+        upstream_master_host = target_host
+        upstream_master_port = target_port
+        upstream_connected = False
+
+        new_master_connection, initial_buffer, new_parent_node_id = send_replica_ping(
+            target_host,
+            target_port,
+            port,
+        )
+        if new_master_connection is None:
+            print(f"Failed to switch replication upstream to {target_host}:{target_port}")
+            return
+
+        master_connection = new_master_connection
+        master_connection.setblocking(False)
+        inputs.append(master_connection)
+        recv_buffer[master_connection] = initial_buffer
+        send_queue[master_connection] = []
+        upstream_connected = True
+        parent_node_id = new_parent_node_id
+        last_master_activity_at = datetime.now()
+        process_master_input_buffer(master_connection)
+
     if master_connection is not None:
         recv_buffer[master_connection] = master_initial_buffer
         send_queue[master_connection] = []
         if master_initial_buffer:
-            try:
-                while True:
-                    commands, remaining = parse_resp_from_buffer(recv_buffer[master_connection])
-                    if commands is None:
-                        recv_buffer[master_connection] = remaining
-                        break
-
-                    command_bytes_len = len(recv_buffer[master_connection]) - len(remaining)
-                    recv_buffer[master_connection] = remaining
-                    response = handle_client(commands, client_socket=master_connection)
-                    is_getack_request = (
-                        len(commands) == 3
-                        and commands[0].upper() == "REPLCONF"
-                        and commands[1].upper() == "GETACK"
-                        and commands[2] == "*"
-                    )
-                    if not is_getack_request:
-                        response = None
-                    else:
-                        response = encode_resp_array(["REPLCONF", "ACK", str(replica_repl_offset)])
-                    replica_repl_offset += command_bytes_len
-
-                    if response is not None:
-                        send_queue[master_connection].append(response)
-                        if master_connection not in outputs:
-                            outputs.append(master_connection)
-                        flush_send_queue_for_socket(master_connection)
-            except ValueError:
-                recv_buffer[master_connection] = b""
+            last_master_activity_at = datetime.now()
+            process_master_input_buffer(master_connection)
 
     try:
         while True:
@@ -1905,6 +2332,19 @@ def main():
             maybe_reap_bgsave_status(now)
             maybe_start_bgsave(now)
             flush_aof_if_needed(now)
+            apply_pending_replicaof_change()
+
+            if (
+                auto_failover_enabled
+                and server_role == "slave"
+                and master_connection is not None
+                and now >= last_master_activity_at + timedelta(milliseconds=failover_timeout_ms)
+            ):
+                close_client_socket(master_connection, inputs, outputs, recv_buffer, send_queue)
+                attempt_failover_election(
+                    f"master timeout after {failover_timeout_ms}ms"
+                )
+                master_connection = None
 
             for key, deadline in list(blocked_client_deadline.items()):
                 if key in send_queue and datetime.now() >= deadline:
@@ -1942,6 +2382,8 @@ def main():
                 else:
                     data = s.recv(socket_receive_buffer_size)
                     if data:
+                        if master_connection is not None and s is master_connection:
+                            last_master_activity_at = datetime.now()
                         recv_buffer[s] += data
 
                         try:
@@ -1989,6 +2431,12 @@ def main():
                                 if s not in outputs:
                                     outputs.append(s)
                     else:
+                        if master_connection is not None and s is master_connection:
+                            if auto_failover_enabled:
+                                promote_to_master("master connection closed")
+                                master_connection = None
+                            else:
+                                upstream_connected = False
                         close_client_socket(s, inputs, outputs, recv_buffer, send_queue)
             for s in writable:
                 if s in send_queue and send_queue[s]:
@@ -1996,9 +2444,21 @@ def main():
                         flush_send_queue_for_socket(s)
                     except Exception as e:
                         print(f"处理客户端 {s.getpeername()} 时出错: {e}")
+                        if master_connection is not None and s is master_connection:
+                            if auto_failover_enabled:
+                                promote_to_master("master write error")
+                                master_connection = None
+                            else:
+                                upstream_connected = False
                         close_client_socket(s, inputs, outputs, recv_buffer, send_queue)
 
             for s in exceptional:
+                if master_connection is not None and s is master_connection:
+                    if auto_failover_enabled:
+                        promote_to_master("master socket exception")
+                        master_connection = None
+                    else:
+                        upstream_connected = False
                 close_client_socket(s, inputs, outputs, recv_buffer, send_queue)
             
     except Exception as e:
