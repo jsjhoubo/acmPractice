@@ -411,7 +411,10 @@ def handle_client(commands, client_socket=None):
             return encode_subscription_error(command_name)
 
         if command_name == "PING":
-            response = b"+PONG\r\n"
+            if get_subscription_count(client_socket) > 0:
+                response = b"*2\r\n$4\r\npong\r\n$0\r\n\r\n"
+            else:
+                response = b"+PONG\r\n"
         elif command_name == "SUBSCRIBE":
             if len(commands) < 2:
                 response = b"-ERR wrong number of arguments for 'subscribe' command\r\n"
