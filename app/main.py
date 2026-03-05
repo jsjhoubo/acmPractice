@@ -642,6 +642,55 @@ def parse_resp_from_buffer(buffer: bytes):
 
     return items, buffer[index:]
 
+BASE32 = "0123456789bcdefghjkmnpqrstuvwxyz"
+
+def encode_geohash(longitude: float, latitude: float, precision: int = 12) -> str:
+    """
+    Encode (lon, lat) to geohash string.
+    lon in [-180, 180], lat in [-90, 90]
+    precision: number of geohash characters.
+    """
+    if not (-180.0 <= longitude <= 180.0):
+        raise ValueError("longitude out of range [-180, 180]")
+    if not (-90.0 <= latitude <= 90.0):
+        raise ValueError("latitude out of range [-90, 90]")
+
+    lon_min, lon_max = -180.0, 180.0
+    lat_min, lat_max = -90.0, 90.0
+
+    bits = [16, 8, 4, 2, 1]  # 5 bits per char
+    geohash = []
+
+    is_even = True
+    ch = 0
+    bit = 0
+
+    while len(geohash) < precision:
+        if is_even:
+            mid = (lon_min + lon_max) / 2.0
+            if longitude >= mid:
+                ch |= bits[bit]
+                lon_min = mid
+            else:
+                lon_max = mid
+        else:
+            mid = (lat_min + lat_max) / 2.0
+            if latitude >= mid:
+                ch |= bits[bit]
+                lat_min = mid
+            else:
+                lat_max = mid
+
+        is_even = not is_even
+
+        if bit < 4:
+            bit += 1
+        else:
+            geohash.append(BASE32[ch])
+            bit = 0
+            ch = 0
+
+    return "".join(geohash)
 
 def wake_blocked_clients_for_key(key: str, max_wake_count: int):
     if key not in blocked_clients_by_key:
@@ -1184,6 +1233,35 @@ def handle_client(commands, client_socket=None):
                 else:
                     score_str = str(score)
                     response = f"${len(score_str)}\r\n{score_str}\r\n".encode()
+        elif command_name == "GEOADD":
+            if len(commands) < 5 or (len(commands) - 2) % 3 != 0:
+                response = b"-ERR wrong number of arguments for 'geoadd' command\r\n"
+            else:
+                key = commands[1]
+                if key not in storage:
+                    storage[key] = RedisSortedSet()
+                elif not isinstance(storage[key], RedisSortedSet):
+                    response = b"-ERR wrong type of value for 'geoadd' command\r\n"
+                    return response
+
+                added_members = 0
+                index = 2
+                while index < len(commands):
+                    try:
+                        longitude = float(commands[index])
+                        latitude = float(commands[index + 1])
+                    except ValueError:
+                        response = b"-ERR invalid longitude or latitude value\r\n"
+                        return response
+
+                    member = commands[index + 2]
+                    score = encode_geohash(longitude, latitude)
+                    added_members += storage[key].add(score, member)
+                    index += 3
+
+                propagate_to_replicas(commands, source_client=client_socket)
+                append_to_aof(commands)
+                response = f":{added_members}\r\n".encode()
         elif command_name == "INFO":
             if len(commands) == 1:
                 role_for_info = "slave" if upstream_master_host is not None else "master"
