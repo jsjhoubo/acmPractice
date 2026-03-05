@@ -1484,6 +1484,28 @@ def handle_client(commands, client_socket=None):
                             f"${len(longitude_str)}\r\n{longitude_str}\r\n"
                             f"${len(latitude_str)}\r\n{latitude_str}\r\n"
                         ).encode()
+        elif command_name == "GEODIST":
+            if len(commands) != 4:
+                response = b"-ERR wrong number of arguments for 'geodist' command\r\n"
+            else:
+                key = commands[1]
+                member1 = commands[2]
+                member2 = commands[3]
+                if key not in storage or not isinstance(storage[key], RedisSortedSet):
+                    response = b"$-1\r\n"
+                else:
+                    score1 = storage[key].score(member1)
+                    score2 = storage[key].score(member2)
+                    if score1 is None or score2 is None:
+                        response = b"$-1\r\n"
+                    else:
+                        longitude1, latitude1 = decode_geohash(int(score1))
+                        longitude2, latitude2 = decode_geohash(int(score2))
+                        distance_meters = calculate_distance(longitude1, latitude1, longitude2, latitude2)
+                        
+                        distance = distance_meters
+                        distance_str = str(distance)
+                        response = f"${len(distance_str)}\r\n{distance_str}\r\n".encode()
         elif command_name == "INFO":
             if len(commands) == 1:
                 role_for_info = "slave" if get_replication_role() == "replica" else "master"
