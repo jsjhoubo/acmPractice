@@ -155,6 +155,9 @@ class RedisSortedSet:
     def cardinality(self):
         return len(self.member_scores)
 
+    def score(self, member: str):
+        return self.member_scores.get(member)
+
 
 class BlockedXReadRequest:
     def __init__(self, client_socket, resolved_streams, count, deadline):
