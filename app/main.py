@@ -123,6 +123,35 @@ class RedisSortedSet:
             return rank
         return None
 
+    def range(self, start: int, end: int):
+        ordered_members = []
+        current = self.head.forward[0]
+        while current is not None:
+            ordered_members.append((current.member, current.score))
+            current = current.forward[0]
+
+        member_count = len(ordered_members)
+        if member_count == 0:
+            return []
+
+        if start < 0:
+            start += member_count
+        if end < 0:
+            end += member_count
+
+        if start < 0:
+            start = 0
+        if end < 0:
+            return []
+        if start >= member_count:
+            return []
+        if end >= member_count:
+            end = member_count - 1
+        if start > end:
+            return []
+
+        return ordered_members[start:end + 1]
+
 
 class BlockedXReadRequest:
     def __init__(self, client_socket, resolved_streams, count, deadline):
@@ -1056,6 +1085,9 @@ def handle_client(commands, client_socket=None):
                 append_to_aof(commands)
                 response = f":{added_members}\r\n".encode()
         elif command_name == "ZRANK":
+            if len(commands) != 3:
+                response = b"-ERR wrong number of arguments for 'zrank' command\r\n"
+                return response
             key = commands[1]
             member = commands[2]
             if key not in storage or not isinstance(storage[key], RedisSortedSet):
@@ -1067,15 +1099,29 @@ def handle_client(commands, client_socket=None):
                 else:
                     response = f":{rank}\r\n".encode()
         elif command_name == "ZRANGE":
+            if len(commands) not in {4, 5}:
+                response = b"-ERR wrong number of arguments for 'zrange' command\r\n"
+                return response
+
             key = commands[1]
-            start = int(commands[2])
-            end = int(commands[3])
-            withscores = len(commands) > 4 and commands[4].upper() == "WITHSCORES"
+            try:
+                start = int(commands[2])
+                end = int(commands[3])
+            except ValueError:
+                response = b"-ERR value is not an integer or out of range\r\n"
+                return response
+
+            withscores = len(commands) == 5
+            if withscores and commands[4].upper() != "WITHSCORES":
+                response = b"-ERR syntax error\r\n"
+                return response
+
             if key not in storage or not isinstance(storage[key], RedisSortedSet):
                 response = b"*0\r\n"
             else:
                 members = storage[key].range(start, end)
-                response = f"*{len(members)}\r\n".encode()
+                element_count = len(members) * 2 if withscores else len(members)
+                response = f"*{element_count}\r\n".encode()
                 for member, score in members:
                     response += f"${len(member)}\r\n{member}\r\n".encode()
                     if withscores:
