@@ -3,11 +3,16 @@ import socket  # noqa: F401
 import sys
 from datetime import datetime, timedelta
 import os
+import signal
+import random
 
 socket_queue_size = 128
 socket_receive_buffer_size = 1024
 socket_timeout = 1
 transaction_queue_limit = 1000
+rdb_save_rules_default = [(900, 1), (300, 10), (60, 10000)]
+rdb_bgsave_reap_mode_default = "poll"
+aof_fsync_interval_seconds = 1
 subscribed_mode_allowed_commands = {
     "SUBSCRIBE",
     "UNSUBSCRIBE",
@@ -22,6 +27,85 @@ subscribed_mode_allowed_commands = {
 class RedisStream:
     def __init__(self):
         self.entries = []
+
+
+class SkipListNode:
+    def __init__(self, score: float, member: str, level: int):
+        self.score = score
+        self.member = member
+        self.forward = [None] * level
+
+
+class RedisSortedSet:
+    def __init__(self):
+        self.member_scores = {}
+        self.max_level = 16
+        self.probability = 0.25
+        self.level = 1
+        self.head = SkipListNode(float("-inf"), "", self.max_level)
+
+    def _random_level(self):
+        level = 1
+        while level < self.max_level and random.random() < self.probability:
+            level += 1
+        return level
+
+    def _comes_before(self, node, score: float, member: str):
+        return node.score < score or (node.score == score and node.member < member)
+
+    def _find_update_path(self, score: float, member: str):
+        update = [None] * self.max_level
+        current = self.head
+        for level_index in range(self.level - 1, -1, -1):
+            while (
+                current.forward[level_index] is not None
+                and self._comes_before(current.forward[level_index], score, member)
+            ):
+                current = current.forward[level_index]
+            update[level_index] = current
+        return update
+
+    def _insert_skiplist_node(self, score: float, member: str):
+        update = self._find_update_path(score, member)
+        node_level = self._random_level()
+
+        if node_level > self.level:
+            for level_index in range(self.level, node_level):
+                update[level_index] = self.head
+            self.level = node_level
+
+        new_node = SkipListNode(score, member, node_level)
+        for level_index in range(node_level):
+            new_node.forward[level_index] = update[level_index].forward[level_index]
+            update[level_index].forward[level_index] = new_node
+
+    def _remove_skiplist_node(self, score: float, member: str):
+        update = self._find_update_path(score, member)
+        target = update[0].forward[0]
+        if target is None or target.score != score or target.member != member:
+            return
+
+        for level_index in range(self.level):
+            if update[level_index].forward[level_index] is target:
+                update[level_index].forward[level_index] = target.forward[level_index]
+
+        while self.level > 1 and self.head.forward[self.level - 1] is None:
+            self.level -= 1
+
+    def add(self, score: float, member: str):
+        if member in self.member_scores:
+            previous_score = self.member_scores[member]
+            if previous_score == score:
+                return 0
+
+            self._remove_skiplist_node(previous_score, member)
+            self.member_scores[member] = score
+            self._insert_skiplist_node(score, member)
+            return 0
+
+        self.member_scores[member] = score
+        self._insert_skiplist_node(score, member)
+        return 1
 
 
 class BlockedXReadRequest:
@@ -100,6 +184,182 @@ def load_rdb_file(dir_path, filename, target_storage):
         raw = f.read()
         load_rdb_bytes(raw, target_storage, expire_times)
     return b"+OK\r\n"
+
+
+def encode_rdb_length(length: int):
+    if length < 0:
+        raise ValueError("RDB length cannot be negative")
+    if length < 64:
+        return bytes([length])
+    if length < 16384:
+        first = 0x40 | ((length >> 8) & 0x3F)
+        second = length & 0xFF
+        return bytes([first, second])
+    return bytes([0x80]) + length.to_bytes(4, byteorder="big", signed=False)
+
+
+def encode_rdb_string(value: str):
+    encoded = value.encode()
+    return encode_rdb_length(len(encoded)) + encoded
+
+
+def build_rdb_snapshot_bytes(source_storage, source_expire_times):
+    raw = bytearray(b"REDIS0012")
+    now = datetime.now()
+
+    for key, value in source_storage.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            continue
+
+        expire_at = source_expire_times.get(key)
+        if expire_at is not None:
+            if now >= expire_at:
+                continue
+            expire_ms = int(expire_at.timestamp() * 1000)
+            raw.append(0xFC)
+            raw.extend(expire_ms.to_bytes(8, byteorder="little", signed=False))
+
+        raw.append(0x00)
+        raw.extend(encode_rdb_string(key))
+        raw.extend(encode_rdb_string(value))
+
+    raw.append(0xFF)
+    return bytes(raw)
+
+
+def persist_rdb_snapshot():
+    try:
+        raw = build_rdb_snapshot_bytes(storage, expire_times)
+        tmp_file_path = os.path.join(redis_config_dir, f"{redis_config_dbfilename}.tmp")
+        file_path = os.path.join(redis_config_dir, redis_config_dbfilename)
+        with open(tmp_file_path, "wb") as f:
+            f.write(raw)
+        os.replace(tmp_file_path, file_path)
+        return True
+    except OSError as error:
+        print(f"Failed to persist RDB snapshot: {error}")
+        return False
+
+
+def mark_rdb_snapshot_dirty():
+    global rdb_snapshot_dirty
+    global rdb_dirty_version
+    global rdb_changes_since_last_save
+    rdb_snapshot_dirty = True
+    rdb_dirty_version += 1
+    rdb_changes_since_last_save += 1
+
+
+def should_trigger_bgsave(now: datetime):
+    if not rdb_snapshot_dirty:
+        return False
+
+    elapsed_seconds = int((now - last_rdb_save_time).total_seconds())
+    for required_seconds, required_changes in rdb_save_rules:
+        if elapsed_seconds >= required_seconds and rdb_changes_since_last_save >= required_changes:
+            return True
+    return False
+
+
+def handle_sigchld(_signum, _frame):
+    global rdb_child_exit_pending
+    rdb_child_exit_pending = True
+
+
+def maybe_start_bgsave(now: datetime):
+    global rdb_bgsave_pid
+    global rdb_bgsave_version
+    global rdb_bgsave_changes_at_start
+
+    if rdb_bgsave_pid is not None:
+        return
+    if not should_trigger_bgsave(now):
+        return
+
+    pid = os.fork()
+    if pid == 0:
+        success = persist_rdb_snapshot()
+        os._exit(0 if success else 1)
+
+    rdb_bgsave_pid = pid
+    rdb_bgsave_version = rdb_dirty_version
+    rdb_bgsave_changes_at_start = rdb_changes_since_last_save
+
+
+def poll_bgsave_status(now: datetime):
+    global rdb_bgsave_pid
+    global rdb_bgsave_version
+    global rdb_bgsave_changes_at_start
+    global rdb_snapshot_dirty
+    global rdb_changes_since_last_save
+    global last_rdb_save_time
+
+    if rdb_bgsave_pid is None:
+        return
+
+    try:
+        finished_pid, status = os.waitpid(rdb_bgsave_pid, os.WNOHANG)
+    except ChildProcessError:
+        finished_pid = rdb_bgsave_pid
+        status = 1
+
+    if finished_pid == 0:
+        return
+
+    success = os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0
+    if success:
+        last_rdb_save_time = now
+        remaining_changes = max(0, rdb_changes_since_last_save - rdb_bgsave_changes_at_start)
+        rdb_changes_since_last_save = remaining_changes
+        rdb_snapshot_dirty = remaining_changes > 0
+
+    rdb_bgsave_pid = None
+    rdb_bgsave_version = 0
+    rdb_bgsave_changes_at_start = 0
+
+
+def maybe_reap_bgsave_status(now: datetime):
+    global rdb_child_exit_pending
+
+    if rdb_bgsave_reap_mode == "sigchld":
+        if not rdb_child_exit_pending:
+            return
+        rdb_child_exit_pending = False
+
+    poll_bgsave_status(now)
+
+
+def append_to_aof(commands):
+    global next_aof_fsync_at
+
+    if not aof_enabled or aof_file is None:
+        return
+
+    encoded_command = encode_resp_array(commands)
+
+    if aof_fsync_policy == "always":
+        aof_file.write(encoded_command)
+        aof_file.flush()
+        os.fsync(aof_file.fileno())
+        return
+
+    aof_pending_chunks.append(encoded_command)
+
+
+def flush_aof_if_needed(now: datetime):
+    global next_aof_fsync_at
+
+    if not aof_enabled or aof_file is None:
+        return
+
+    if aof_pending_chunks:
+        aof_file.write(b"".join(aof_pending_chunks))
+        aof_pending_chunks.clear()
+        aof_file.flush()
+
+    if aof_fsync_policy == "everysec" and now >= next_aof_fsync_at:
+        os.fsync(aof_file.fileno())
+        next_aof_fsync_at = now + timedelta(seconds=aof_fsync_interval_seconds)
 
 
 def read_length(raw: bytes, idx: int):
@@ -421,6 +681,7 @@ def handle_client(commands, client_socket=None):
             else:
                 channel = commands[1]
                 message = commands[2]
+                propagate_to_replicas(commands, source_client=client_socket)
                 receivers = 0
                 if channel in subscriptions:
                     for client in subscriptions[channel]:
@@ -558,15 +819,10 @@ def handle_client(commands, client_socket=None):
                 if client_socket is not None:
                     replica_connections.add(client_socket)
                     replica_ack_offsets[client_socket] = 0
-                empty_rdb_hex = (
-                    "524544495330303132fa0972656469732d76657205372e342e38"
-                    "fa0a72656469732d62697473c040fa056374696d65c2a111a169"
-                    "fa08757365642d6d656dc2d00e0f00fa08616f662d62617365c000ff"
-                )
-                empty_rdb_bytes = bytes.fromhex(empty_rdb_hex)
-                rdb_header = f"${len(empty_rdb_bytes)}\r\n".encode()
+                snapshot_rdb_bytes = build_rdb_snapshot_bytes(storage, expire_times)
+                rdb_header = f"${len(snapshot_rdb_bytes)}\r\n".encode()
                 client_socket.sendall(response)
-                client_socket.sendall(rdb_header + empty_rdb_bytes)
+                client_socket.sendall(rdb_header + snapshot_rdb_bytes)
                 response = None
         elif command_name == "ECHO":
             if len(commands) != 2:
@@ -578,7 +834,10 @@ def handle_client(commands, client_socket=None):
                 key = commands[1]
                 value = commands[2]
                 storage[key] = value
+                expire_times.pop(key, None)
                 propagate_to_replicas(commands, source_client=client_socket)
+                append_to_aof(commands)
+                mark_rdb_snapshot_dirty()
                 response = b"+OK\r\n"
             elif len(commands) == 5 and (commands[3].upper() == "EX" or commands[3].upper() == "PX"):
                 key = commands[1]
@@ -591,6 +850,8 @@ def handle_client(commands, client_socket=None):
                     expire_time = datetime.now() + timedelta(milliseconds=timeout_value)
                 expire_times[key] = expire_time
                 propagate_to_replicas(commands, source_client=client_socket)
+                append_to_aof(commands)
+                mark_rdb_snapshot_dirty()
                 response = b"+OK\r\n"
             else:
                 response = b"-ERR wrong number of arguments for 'set' command\r\n"
@@ -620,6 +881,8 @@ def handle_client(commands, client_socket=None):
                     value = "1"
                     storage[key] = value
                     propagate_to_replicas(commands, source_client=client_socket)
+                    append_to_aof(commands)
+                    mark_rdb_snapshot_dirty()
                     response = b":1\r\n"
                 else:
                     try:
@@ -629,6 +892,8 @@ def handle_client(commands, client_socket=None):
                     else:
                         storage[key] = str(incremented_value)
                         propagate_to_replicas(commands, source_client=client_socket)
+                        append_to_aof(commands)
+                        mark_rdb_snapshot_dirty()
                         response = f":{incremented_value}\r\n".encode()
         elif command_name == "RPUSH":
             key = commands[1]
@@ -640,6 +905,7 @@ def handle_client(commands, client_socket=None):
             for value in commands[2:]:
                 storage[key].append(value)
             propagate_to_replicas(commands, source_client=client_socket)
+            append_to_aof(commands)
             pushed_length = len(storage[key])
             wake_blocked_clients_for_key(key, len(commands) - 2)
             response = f":{pushed_length}\r\n".encode()
@@ -653,6 +919,7 @@ def handle_client(commands, client_socket=None):
             for value in commands[2:]:
                 storage[key].insert(0, value)
             propagate_to_replicas(commands, source_client=client_socket)
+            append_to_aof(commands)
             pushed_length = len(storage[key])
             wake_blocked_clients_for_key(key, len(commands) - 2)
             response = f":{pushed_length}\r\n".encode()
@@ -692,6 +959,7 @@ def handle_client(commands, client_socket=None):
                         items_to_pop = min(count, len(storage[key]))
                         values = [storage[key].pop(0) for _ in range(items_to_pop)]
                         propagate_to_replicas(commands, source_client=client_socket)
+                        append_to_aof(commands)
                         response = f"*{len(values)}\r\n".encode()
                         for value in values:
                             response += f"${len(value)}\r\n{value}\r\n".encode()
@@ -700,6 +968,7 @@ def handle_client(commands, client_socket=None):
             else:
                 value = storage[key].pop(0)
                 propagate_to_replicas(commands, source_client=client_socket)
+                append_to_aof(commands)
                 response = f"${len(value)}\r\n{value}\r\n".encode()
         elif command_name == "BLPOP":
             key = commands[1]
@@ -737,9 +1006,39 @@ def handle_client(commands, client_socket=None):
                     value_type = "string"
                 elif isinstance(value, RedisStream):
                     value_type = "stream"
+                elif isinstance(value, RedisSortedSet):
+                    value_type = "zset"
                 else:
                     value_type = python_type
                 response = f"+{value_type}\r\n".encode()
+        elif command_name == "ZADD":
+            if len(commands) < 4 or (len(commands) - 2) % 2 != 0:
+                response = b"-ERR wrong number of arguments for 'zadd' command\r\n"
+            else:
+                key = commands[1]
+                if key not in storage:
+                    storage[key] = RedisSortedSet()
+                elif not isinstance(storage[key], RedisSortedSet):
+                    response = b"-ERR wrong type of value for 'zadd' command\r\n"
+                    return response
+
+                added_members = 0
+                index = 2
+                while index < len(commands):
+                    score_raw = commands[index]
+                    member = commands[index + 1]
+                    try:
+                        score = float(score_raw)
+                    except ValueError:
+                        response = b"-ERR value is not a valid float\r\n"
+                        return response
+
+                    added_members += storage[key].add(score, member)
+                    index += 2
+
+                propagate_to_replicas(commands, source_client=client_socket)
+                append_to_aof(commands)
+                response = f":{added_members}\r\n".encode()
         elif command_name == "INFO":
             if len(commands) == 1:
                 role_for_info = "slave" if upstream_master_host is not None else "master"
@@ -842,6 +1141,7 @@ def handle_client(commands, client_socket=None):
 
             storage[key].entries.append((entry_id, fields))
             propagate_to_replicas(commands, source_client=client_socket)
+            append_to_aof(commands)
             wake_blocked_xread_clients_for_stream(key)
             response = f"${len(entry_id)}\r\n{entry_id}\r\n".encode()
         elif command_name == "XRANGE":
@@ -1114,6 +1414,14 @@ def main():
     master_port = None
     config_dir = "."
     config_dbfilename = "dump.rdb"
+    appendonly = False
+    appendfilename = "appendonly.aof"
+    appendfsync = "everysec"
+    save_rules = list(rdb_save_rules_default)
+    bgsave_reap_mode = os.environ.get(
+        "REDIS_BGSAVE_REAP_MODE",
+        rdb_bgsave_reap_mode_default,
+    ).lower()
     if "--port" in sys.argv:
         port_arg_index = sys.argv.index("--port")
         if port_arg_index + 1 < len(sys.argv):
@@ -1126,6 +1434,67 @@ def main():
         dbfilename_arg_index = sys.argv.index("--dbfilename")
         if dbfilename_arg_index + 1 < len(sys.argv):
             config_dbfilename = sys.argv[dbfilename_arg_index + 1]
+    if "--appendonly" in sys.argv:
+        appendonly_arg_index = sys.argv.index("--appendonly")
+        if appendonly_arg_index + 1 < len(sys.argv):
+            appendonly_value = sys.argv[appendonly_arg_index + 1].lower()
+            if appendonly_value not in {"yes", "no"}:
+                print("Invalid --appendonly value, expected 'yes' or 'no'")
+                return
+            appendonly = appendonly_value == "yes"
+        else:
+            print("Usage: --appendonly <yes|no>")
+            return
+    if "--appendfilename" in sys.argv:
+        appendfilename_arg_index = sys.argv.index("--appendfilename")
+        if appendfilename_arg_index + 1 < len(sys.argv):
+            appendfilename = sys.argv[appendfilename_arg_index + 1]
+        else:
+            print("Usage: --appendfilename <filename>")
+            return
+    if "--appendfsync" in sys.argv:
+        appendfsync_arg_index = sys.argv.index("--appendfsync")
+        if appendfsync_arg_index + 1 < len(sys.argv):
+            appendfsync = sys.argv[appendfsync_arg_index + 1].lower()
+        else:
+            print("Usage: --appendfsync <always|everysec|no>")
+            return
+    if appendfsync not in {"always", "everysec", "no"}:
+        print("Invalid --appendfsync value, expected 'always', 'everysec', or 'no'")
+        return
+    if "--bgsave-reap-mode" in sys.argv:
+        mode_arg_index = sys.argv.index("--bgsave-reap-mode")
+        if mode_arg_index + 1 < len(sys.argv):
+            bgsave_reap_mode = sys.argv[mode_arg_index + 1].lower()
+        else:
+            print("Usage: --bgsave-reap-mode <poll|sigchld>")
+            return
+
+    if bgsave_reap_mode not in {"poll", "sigchld"}:
+        print("Invalid --bgsave-reap-mode value, expected 'poll' or 'sigchld'")
+        return
+
+    if "--save-rule" in sys.argv:
+        save_rule_index = 0
+        save_rules = []
+        while save_rule_index < len(sys.argv):
+            if sys.argv[save_rule_index] != "--save-rule":
+                save_rule_index += 1
+                continue
+            if save_rule_index + 2 >= len(sys.argv):
+                print("Usage: --save-rule <seconds> <changes>")
+                return
+            try:
+                seconds_value = int(sys.argv[save_rule_index + 1])
+                changes_value = int(sys.argv[save_rule_index + 2])
+            except ValueError:
+                print("Invalid --save-rule arguments, expected integers")
+                return
+            if seconds_value <= 0 or changes_value <= 0:
+                print("Invalid --save-rule arguments, values must be > 0")
+                return
+            save_rules.append((seconds_value, changes_value))
+            save_rule_index += 3
     if "--replicaof" in sys.argv:
         replicaof_arg_index = sys.argv.index("--replicaof")
         if replicaof_arg_index + 1 < len(sys.argv):
@@ -1193,6 +1562,44 @@ def main():
     commands_queue = []
     global transaction_queue
     transaction_queue = {}
+    global rdb_snapshot_dirty
+    rdb_snapshot_dirty = False
+    global rdb_save_rules
+    rdb_save_rules = save_rules
+    global rdb_dirty_version
+    rdb_dirty_version = 0
+    global rdb_changes_since_last_save
+    rdb_changes_since_last_save = 0
+    global last_rdb_save_time
+    last_rdb_save_time = datetime.now()
+    global rdb_bgsave_pid
+    rdb_bgsave_pid = None
+    global rdb_bgsave_version
+    rdb_bgsave_version = 0
+    global rdb_bgsave_changes_at_start
+    rdb_bgsave_changes_at_start = 0
+    global rdb_bgsave_reap_mode
+    rdb_bgsave_reap_mode = bgsave_reap_mode
+    global rdb_child_exit_pending
+    rdb_child_exit_pending = False
+
+    global aof_enabled
+    aof_enabled = appendonly
+    global aof_fsync_policy
+    aof_fsync_policy = appendfsync
+    global aof_pending_chunks
+    aof_pending_chunks = []
+    global aof_file
+    aof_file = None
+    global next_aof_fsync_at
+    next_aof_fsync_at = datetime.now() + timedelta(seconds=aof_fsync_interval_seconds)
+
+    if aof_enabled:
+        aof_file_path = os.path.join(redis_config_dir, appendfilename)
+        aof_file = open(aof_file_path, "ab")
+
+    if rdb_bgsave_reap_mode == "sigchld":
+        signal.signal(signal.SIGCHLD, handle_sigchld)
     # You can use print statements as follows for debugging, they'll be visible when running tests.
     print("Logs from your program will appear here!")
     
@@ -1265,6 +1672,12 @@ def main():
         while True:
             readable, writable, exceptional = select.select(
                 inputs, outputs, inputs, socket_timeout)
+
+            now = datetime.now()
+            maybe_reap_bgsave_status(now)
+            maybe_start_bgsave(now)
+            flush_aof_if_needed(now)
+
             for key, deadline in list(blocked_client_deadline.items()):
                 if key in send_queue and datetime.now() >= deadline:
                     send_queue[key].append(b"*-1\r\n")
