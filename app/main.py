@@ -380,8 +380,9 @@ def handle_client(commands, client_socket=None):
                     if channel not in subscriptions:
                         subscriptions[channel] = set()
                     subscriptions[channel].add(client_socket)
+                number_subscriptions = len([1 for k, v in subscriptions.items() if client_socket in v])
                 response = b"".join(
-                    f"*3\r\n$9\r\nsubscribe\r\n${len(channel)}\r\n{channel}\r\n:1\r\n".encode()
+                    f"*3\r\n$9\r\nsubscribe\r\n${len(channel)}\r\n{channel}\r\n:{number_subscriptions}\r\n".encode()
                     for channel in commands[1:]
                 )
         elif commands[0] == "KEYS":
