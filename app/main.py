@@ -415,7 +415,7 @@ def handle_client(commands, client_socket=None):
                 response = b"*2\r\n$4\r\npong\r\n$0\r\n\r\n"
             else:
                 response = b"+PONG\r\n"
-        if command_name == "PUBLISH":
+        elif command_name == "PUBLISH":
             if len(commands) != 3:
                 response = b"-ERR wrong number of arguments for 'publish' command\r\n"
             else:
