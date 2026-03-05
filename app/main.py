@@ -1039,6 +1039,17 @@ def handle_client(commands, client_socket=None):
                 propagate_to_replicas(commands, source_client=client_socket)
                 append_to_aof(commands)
                 response = f":{added_members}\r\n".encode()
+        elif command_name == "ZRANK":
+            key = commands[1]
+            member = commands[2]
+            if key not in storage or not isinstance(storage[key], RedisSortedSet):
+                response = b"$-1\r\n"
+            else:
+                rank = storage[key].rank(member)
+                if rank is None:
+                    response = b"$-1\r\n"
+                else:
+                    response = f":{rank}\r\n".encode()
         elif command_name == "INFO":
             if len(commands) == 1:
                 role_for_info = "slave" if upstream_master_host is not None else "master"
