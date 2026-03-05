@@ -1567,32 +1567,63 @@ def handle_client(commands, client_socket=None):
                         distance_str = str(distance)
                         response = f"${len(distance_str)}\r\n{distance_str}\r\n".encode()
         elif command_name == "GEOSEARCH":
-            if len(commands) < 4:
+            if len(commands) < 8:
                 response = b"-ERR wrong number of arguments for 'geosearch' command\r\n"
             else:
                 key = commands[1]
                 if key not in storage or not isinstance(storage[key], RedisSortedSet):
                     response = b"*0\r\n"
                 else:
-                    query_type = commands[2].upper()
+                    if commands[2].upper() != "FROMLONLAT":
+                        response = b"-ERR syntax error\r\n"
+                        return response
+
+                    try:
+                        longitude = float(commands[3])
+                        latitude = float(commands[4])
+                    except ValueError:
+                        response = b"-ERR invalid longitude or latitude value\r\n"
+                        return response
+
+                    query_type = commands[5].upper()
+                    conversion_factors = {
+                        "M": 1.0,
+                        "KM": 1000.0,
+                        "MI": 1609.344,
+                        "FT": 0.3048,
+                    }
+
                     if query_type == "BYRADIUS":
                         try:
-                            longitude = float(commands[3])
-                            latitude = float(commands[4])
-                            radius = float(commands[5])
+                            radius_value = float(commands[6])
                         except ValueError:
-                            response = b"-ERR invalid longitude, latitude, or radius value\r\n"
+                            response = b"-ERR invalid radius value\r\n"
                             return response
+
+                        unit = commands[7].upper()
+                        if unit not in conversion_factors:
+                            response = b"-ERR unsupported unit provided. please use m, km, ft, mi\r\n"
+                            return response
+                        radius = radius_value * conversion_factors[unit]
                         matching_members = storage[key].search_by_radius(longitude, latitude, radius)
                     elif query_type == "BYBOX":
                         try:
-                            longitude = float(commands[3])
-                            latitude = float(commands[4])
-                            width = float(commands[5])
-                            height = float(commands[6])
+                            width_value = float(commands[6])
+                            height_value = float(commands[7])
                         except ValueError:
-                            response = b"-ERR invalid longitude, latitude, width, or height value\r\n"
+                            response = b"-ERR invalid width or height value\r\n"
                             return response
+
+                        if len(commands) < 9:
+                            response = b"-ERR wrong number of arguments for 'geosearch' command\r\n"
+                            return response
+
+                        unit = commands[8].upper()
+                        if unit not in conversion_factors:
+                            response = b"-ERR unsupported unit provided. please use m, km, ft, mi\r\n"
+                            return response
+                        width = width_value * conversion_factors[unit]
+                        height = height_value * conversion_factors[unit]
                         matching_members = storage[key].search_by_box(longitude, latitude, width, height)
                     else:
                         response = b"-ERR syntax error\r\n"
