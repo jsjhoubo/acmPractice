@@ -415,6 +415,24 @@ def handle_client(commands, client_socket=None):
                 response = b"*2\r\n$4\r\npong\r\n$0\r\n\r\n"
             else:
                 response = b"+PONG\r\n"
+        if command_name == "PUBLISH":
+            if len(commands) != 3:
+                response = b"-ERR wrong number of arguments for 'publish' command\r\n"
+            else:
+                channel = commands[1]
+                message = commands[2]
+                receivers = 0
+                if channel in subscriptions:
+                    for client in subscriptions[channel]:
+                        if client not in send_queue:
+                            continue
+                        send_queue[client].append(
+                            f"*3\r\n$7\r\nmessage\r\n${len(channel)}\r\n{channel}\r\n${len(message)}\r\n{message}\r\n".encode()
+                        )
+                        if client not in outputs:
+                            outputs.append(client)
+                        receivers += 1
+                response = f":{receivers}\r\n".encode()
         elif command_name == "SUBSCRIBE":
             if len(commands) < 2:
                 response = b"-ERR wrong number of arguments for 'subscribe' command\r\n"
