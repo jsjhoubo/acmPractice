@@ -1127,6 +1127,15 @@ def handle_client(commands, client_socket=None):
                     if withscores:
                         score_str = str(score)
                         response += f"${len(score_str)}\r\n{score_str}\r\n".encode()
+        elif command_name == "ZCARD":
+            if len(commands) != 2:
+                response = b"-ERR wrong number of arguments for 'zcard' command\r\n"
+                return response
+            key = commands[1]
+            if key not in storage or not isinstance(storage[key], RedisSortedSet):
+                response = b":0\r\n"
+            else:
+                response = f":{storage[key].cardinality()}\r\n".encode()
         elif command_name == "INFO":
             if len(commands) == 1:
                 role_for_info = "slave" if upstream_master_host is not None else "master"
