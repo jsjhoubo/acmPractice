@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 import os
 import signal
 import random
+import math
 
 socket_queue_size = 128
 socket_receive_buffer_size = 1024
@@ -648,6 +649,7 @@ GEO_MIN_LONGITUDE = -180.0
 GEO_MAX_LONGITUDE = 180.0
 GEO_LATITUDE_RANGE = GEO_MAX_LATITUDE - GEO_MIN_LATITUDE
 GEO_LONGITUDE_RANGE = GEO_MAX_LONGITUDE - GEO_MIN_LONGITUDE
+GEO_EARTH_RADIUS_METERS = 6372797.560856
 
 
 def spread_int32_to_int64(value: int):
@@ -701,6 +703,22 @@ def decode_geohash(score: int):
     latitude = (grid_latitude_min + grid_latitude_max) / 2.0
     longitude = (grid_longitude_min + grid_longitude_max) / 2.0
     return longitude, latitude
+
+
+def calculate_distance(longitude1: float, latitude1: float, longitude2: float, latitude2: float):
+    latitude1_rad = math.radians(latitude1)
+    latitude2_rad = math.radians(latitude2)
+    delta_latitude_rad = latitude2_rad - latitude1_rad
+    delta_longitude_rad = math.radians(longitude2 - longitude1)
+
+    haversine_value = (
+        math.sin(delta_latitude_rad / 2.0) ** 2
+        + math.cos(latitude1_rad)
+        * math.cos(latitude2_rad)
+        * (math.sin(delta_longitude_rad / 2.0) ** 2)
+    )
+    central_angle = 2.0 * math.asin(math.sqrt(haversine_value))
+    return GEO_EARTH_RADIUS_METERS * central_angle
 
 def wake_blocked_clients_for_key(key: str, max_wake_count: int):
     if key not in blocked_clients_by_key:
