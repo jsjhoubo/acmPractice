@@ -1090,6 +1090,20 @@ def handle_client(commands, client_socket=None):
                 propagate_to_replicas(commands, source_client=client_socket)
                 append_to_aof(commands)
                 response = f":{added_members}\r\n".encode()
+        elif command_name == "ZREM":
+            if len(commands) < 3:
+                response = b"-ERR wrong number of arguments for 'zrem' command\r\n"
+            else:
+                key = commands[1]
+                if key not in storage or not isinstance(storage[key], RedisSortedSet):
+                    response = b":0\r\n"
+                else:
+                    removed_members = 0
+                    for member in commands[2:]:
+                        removed_members += storage[key].remove(member)
+                    propagate_to_replicas(commands, source_client=client_socket)
+                    append_to_aof(commands)
+                    response = f":{removed_members}\r\n".encode()
         elif command_name == "ZRANK":
             if len(commands) != 3:
                 response = b"-ERR wrong number of arguments for 'zrank' command\r\n"
