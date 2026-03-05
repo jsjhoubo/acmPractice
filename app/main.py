@@ -107,6 +107,22 @@ class RedisSortedSet:
         self._insert_skiplist_node(score, member)
         return 1
 
+    def rank(self, member: str):
+        if member not in self.member_scores:
+            return None
+
+        target_score = self.member_scores[member]
+        current = self.head.forward[0]
+        rank = 0
+
+        while current is not None and self._comes_before(current, target_score, member):
+            rank += 1
+            current = current.forward[0]
+
+        if current is not None and current.score == target_score and current.member == member:
+            return rank
+        return None
+
 
 class BlockedXReadRequest:
     def __init__(self, client_socket, resolved_streams, count, deadline):
