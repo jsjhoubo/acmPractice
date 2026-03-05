@@ -642,55 +642,39 @@ def parse_resp_from_buffer(buffer: bytes):
 
     return items, buffer[index:]
 
-BASE32 = "0123456789bcdefghjkmnpqrstuvwxyz"
+GEO_MIN_LATITUDE = -85.05112878
+GEO_MAX_LATITUDE = 85.05112878
+GEO_MIN_LONGITUDE = -180.0
+GEO_MAX_LONGITUDE = 180.0
+GEO_LATITUDE_RANGE = GEO_MAX_LATITUDE - GEO_MIN_LATITUDE
+GEO_LONGITUDE_RANGE = GEO_MAX_LONGITUDE - GEO_MIN_LONGITUDE
 
-def encode_geohash(longitude: float, latitude: float, precision: int = 12) -> str:
-    """
-    Encode (lon, lat) to geohash string.
-    lon in [-180, 180], lat in [-90, 90]
-    precision: number of geohash characters.
-    """
-    if not (-180.0 <= longitude <= 180.0):
+
+def spread_int32_to_int64(value: int):
+    result = value & 0xFFFFFFFF
+    result = (result | (result << 16)) & 0x0000FFFF0000FFFF
+    result = (result | (result << 8)) & 0x00FF00FF00FF00FF
+    result = (result | (result << 4)) & 0x0F0F0F0F0F0F0F0F
+    result = (result | (result << 2)) & 0x3333333333333333
+    result = (result | (result << 1)) & 0x5555555555555555
+    return result
+
+
+def encode_geohash(longitude: float, latitude: float):
+    if not (GEO_MIN_LONGITUDE <= longitude <= GEO_MAX_LONGITUDE):
         raise ValueError("longitude out of range [-180, 180]")
-    if not (-90.0 <= latitude <= 90.0):
-        raise ValueError("latitude out of range [-90, 90]")
+    if not (GEO_MIN_LATITUDE <= latitude <= GEO_MAX_LATITUDE):
+        raise ValueError("latitude out of range [-85.05112878, 85.05112878]")
 
-    lon_min, lon_max = -180.0, 180.0
-    lat_min, lat_max = -90.0, 90.0
+    normalized_latitude = (2**26) * (latitude - GEO_MIN_LATITUDE) / GEO_LATITUDE_RANGE
+    normalized_longitude = (2**26) * (longitude - GEO_MIN_LONGITUDE) / GEO_LONGITUDE_RANGE
 
-    bits = [16, 8, 4, 2, 1]  # 5 bits per char
-    geohash = []
+    lat_int = int(normalized_latitude)
+    lon_int = int(normalized_longitude)
 
-    is_even = True
-    ch = 0
-    bit = 0
-
-    while len(geohash) < precision:
-        if is_even:
-            mid = (lon_min + lon_max) / 2.0
-            if longitude >= mid:
-                ch |= bits[bit]
-                lon_min = mid
-            else:
-                lon_max = mid
-        else:
-            mid = (lat_min + lat_max) / 2.0
-            if latitude >= mid:
-                ch |= bits[bit]
-                lat_min = mid
-            else:
-                lat_max = mid
-
-        is_even = not is_even
-
-        if bit < 4:
-            bit += 1
-        else:
-            geohash.append(BASE32[ch])
-            bit = 0
-            ch = 0
-
-    return "".join(geohash)
+    spread_lat = spread_int32_to_int64(lat_int)
+    spread_lon = spread_int32_to_int64(lon_int)
+    return spread_lat | (spread_lon << 1)
 
 def wake_blocked_clients_for_key(key: str, max_wake_count: int):
     if key not in blocked_clients_by_key:
