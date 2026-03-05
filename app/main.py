@@ -8,6 +8,15 @@ socket_queue_size = 128
 socket_receive_buffer_size = 1024
 socket_timeout = 1
 transaction_queue_limit = 1000
+subscribed_mode_allowed_commands = {
+    "SUBSCRIBE",
+    "UNSUBSCRIBE",
+    "PSUBSCRIBE",
+    "PUNSUBSCRIBE",
+    "PING",
+    "QUIT",
+    "RESET",
+}
 
 
 class RedisStream:
@@ -364,15 +373,46 @@ def propagate_to_replicas(commands, source_client=None):
             outputs.append(replica_socket)
 
 
+def get_subscription_count(client_socket):
+    if client_socket is None:
+        return 0
+    return sum(1 for clients in subscriptions.values() if client_socket in clients)
+
+
+def remove_client_from_all_subscriptions(client_socket):
+    if client_socket is None:
+        return
+
+    for channel in list(subscriptions.keys()):
+        clients = subscriptions[channel]
+        if client_socket in clients:
+            clients.remove(client_socket)
+        if not clients:
+            del subscriptions[channel]
+
+
+def encode_subscription_error(command_name: str):
+    return (
+        f"-ERR Can't execute '{command_name.lower()}' in subscribed mode\r\n"
+    ).encode()
+
+
 def handle_client(commands, client_socket=None):
     response = b""
     try:
         if not commands:
             return b"-ERR empty command\r\n"
 
-        if commands[0] == "PING":
+        command_name = commands[0].upper()
+        if (
+            get_subscription_count(client_socket) > 0
+            and command_name not in subscribed_mode_allowed_commands
+        ):
+            return encode_subscription_error(command_name)
+
+        if command_name == "PING":
             response = b"+PONG\r\n"
-        elif commands[0] == "SUBSCRIBE":
+        elif command_name == "SUBSCRIBE":
             if len(commands) < 2:
                 response = b"-ERR wrong number of arguments for 'subscribe' command\r\n"
             else:
@@ -385,7 +425,35 @@ def handle_client(commands, client_socket=None):
                     f"*3\r\n$9\r\nsubscribe\r\n${len(channel)}\r\n{channel}\r\n:{number_subscriptions}\r\n".encode()
                     for channel in commands[1:]
                 )
-        elif commands[0] == "KEYS":
+        elif command_name == "UNSUBSCRIBE":
+            if client_socket is None:
+                response = b"-ERR invalid client\r\n"
+            else:
+                channels_to_remove = commands[1:]
+                if not channels_to_remove:
+                    channels_to_remove = [
+                        channel for channel, clients in subscriptions.items() if client_socket in clients
+                    ]
+
+                payload = b""
+                for channel in channels_to_remove:
+                    if channel in subscriptions and client_socket in subscriptions[channel]:
+                        subscriptions[channel].remove(client_socket)
+                        if not subscriptions[channel]:
+                            del subscriptions[channel]
+                    remaining = get_subscription_count(client_socket)
+                    payload += (
+                        f"*3\r\n$11\r\nunsubscribe\r\n${len(channel)}\r\n{channel}\r\n:{remaining}\r\n".encode()
+                    )
+
+                if payload:
+                    response = payload
+                else:
+                    response = b"*3\r\n$11\r\nunsubscribe\r\n$-1\r\n:0\r\n"
+        elif command_name == "RESET":
+            remove_client_from_all_subscriptions(client_socket)
+            response = b"+RESET\r\n"
+        elif command_name == "KEYS":
             if len(commands) != 2:
                 response = b"-ERR wrong number of arguments for 'keys' command\r\n"
             else:
@@ -397,7 +465,7 @@ def handle_client(commands, client_socket=None):
                 response = f"*{len(matching_keys)}\r\n".encode()
                 for key in matching_keys:
                     response += f"${len(key)}\r\n{key}\r\n".encode()
-        elif commands[0].upper() == "CONFIG":
+        elif command_name == "CONFIG":
             if len(commands) != 3 or commands[1].upper() != "GET":
                 response = b"-ERR wrong number of arguments for 'config' command\r\n"
             else:
@@ -408,7 +476,7 @@ def handle_client(commands, client_socket=None):
                     response = encode_resp_array(["dbfilename", redis_config_dbfilename])
                 else:
                     response = b"*0\r\n"
-        elif commands[0] == "REPLCONF":
+        elif command_name == "REPLCONF":
             if len(commands) != 3:
                 response = b"-ERR wrong number of arguments for 'replconf' command\r\n"
             else:
@@ -425,7 +493,7 @@ def handle_client(commands, client_socket=None):
                         response = None
                 else:
                     response = b"+OK\r\n"
-        elif commands[0] == "WAIT":
+        elif command_name == "WAIT":
             if len(commands) != 3:
                 response = b"-ERR wrong number of arguments for 'wait' command\r\n"
             else:
@@ -459,7 +527,7 @@ def handle_client(commands, client_socket=None):
                             response = None
                 except ValueError:
                     response = b"-ERR invalid arguments for 'wait' command\r\n"
-        elif commands[0] == "PSYNC":
+        elif command_name == "PSYNC":
             if len(commands) != 3:
                 response = b"-ERR wrong number of arguments for 'psync' command\r\n"
             elif commands[1] != "?" or commands[2] != "-1":
@@ -479,12 +547,12 @@ def handle_client(commands, client_socket=None):
                 client_socket.sendall(response)
                 client_socket.sendall(rdb_header + empty_rdb_bytes)
                 response = None
-        elif commands[0] == "ECHO":
+        elif command_name == "ECHO":
             if len(commands) != 2:
                 response = b"-ERR wrong number of arguments for 'echo' command\r\n"
             else:
                 response = f"${len(commands[1])}\r\n{commands[1]}\r\n".encode()
-        elif commands[0] == "SET":
+        elif command_name == "SET":
             if len(commands) == 3:
                 key = commands[1]
                 value = commands[2]
@@ -505,7 +573,7 @@ def handle_client(commands, client_socket=None):
                 response = b"+OK\r\n"
             else:
                 response = b"-ERR wrong number of arguments for 'set' command\r\n"
-        elif commands[0] == "GET":
+        elif command_name == "GET":
             if len(commands) != 2:
                 response = b"-ERR wrong number of arguments for 'get' command\r\n"
             else:
@@ -520,7 +588,7 @@ def handle_client(commands, client_socket=None):
                     response = b"$-1\r\n"
                 else:
                     response = f"${len(value)}\r\n{value}\r\n".encode()
-        elif commands[0] == "INCR":
+        elif command_name == "INCR":
             if len(commands) != 2:
                 response = b"-ERR wrong number of arguments for 'incr' command\r\n"
             else:
@@ -541,7 +609,7 @@ def handle_client(commands, client_socket=None):
                         storage[key] = str(incremented_value)
                         propagate_to_replicas(commands, source_client=client_socket)
                         response = f":{incremented_value}\r\n".encode()
-        elif commands[0] == "RPUSH":
+        elif command_name == "RPUSH":
             key = commands[1]
             if key not in storage:
                 storage[key] = []
@@ -554,7 +622,7 @@ def handle_client(commands, client_socket=None):
             pushed_length = len(storage[key])
             wake_blocked_clients_for_key(key, len(commands) - 2)
             response = f":{pushed_length}\r\n".encode()
-        elif commands[0] == "LPUSH":
+        elif command_name == "LPUSH":
             key = commands[1]
             if key not in storage:
                 storage[key] = []
@@ -567,7 +635,7 @@ def handle_client(commands, client_socket=None):
             pushed_length = len(storage[key])
             wake_blocked_clients_for_key(key, len(commands) - 2)
             response = f":{pushed_length}\r\n".encode()
-        elif commands[0] == "LRANGE":
+        elif command_name == "LRANGE":
             key = commands[1]
             if key not in storage or not isinstance(storage[key], list):
                 response = b"*0\r\n"
@@ -584,13 +652,13 @@ def handle_client(commands, client_socket=None):
                         response += f"${len(item)}\r\n{item}\r\n".encode()
                 except ValueError:
                     response = b"-ERR invalid range\r\n"
-        elif commands[0] == "LLEN":
+        elif command_name == "LLEN":
             key = commands[1]
             if key not in storage or not isinstance(storage[key], list):
                 response = b":0\r\n"
             else:
                 response = f":{len(storage[key])}\r\n".encode()
-        elif commands[0] == "LPOP":
+        elif command_name == "LPOP":
             key = commands[1]
             if key not in storage or not isinstance(storage[key], list) or not storage[key]:
                 response = b"$-1\r\n"
@@ -612,7 +680,7 @@ def handle_client(commands, client_socket=None):
                 value = storage[key].pop(0)
                 propagate_to_replicas(commands, source_client=client_socket)
                 response = f"${len(value)}\r\n{value}\r\n".encode()
-        elif commands[0] == "BLPOP":
+        elif command_name == "BLPOP":
             key = commands[1]
             timeout = 0
             if len(commands) == 3:
@@ -637,7 +705,7 @@ def handle_client(commands, client_socket=None):
                 if timeout > 0:
                     blocked_client_deadline[client_socket] = end_time
                 return None
-        elif commands[0] == "TYPE":
+        elif command_name == "TYPE":
             key = commands[1]
             if key not in storage:
                 response = b"+none\r\n"
@@ -651,7 +719,7 @@ def handle_client(commands, client_socket=None):
                 else:
                     value_type = python_type
                 response = f"+{value_type}\r\n".encode()
-        elif commands[0].upper() == "INFO":
+        elif command_name == "INFO":
             if len(commands) == 1:
                 role_for_info = "slave" if upstream_master_host is not None else "master"
                 info_lines = [
@@ -690,7 +758,7 @@ def handle_client(commands, client_socket=None):
                 response = f"${len(info_content)}\r\n{info_content}\r\n".encode()
             else:
                 response = b"$0\r\n\r\n"
-        elif commands[0] == "XADD":
+        elif command_name == "XADD":
             if len(commands) < 5 or len(commands[3:]) % 2 != 0:
                 response = b"-ERR wrong number of arguments for 'xadd' command\r\n"
                 return response
@@ -755,7 +823,7 @@ def handle_client(commands, client_socket=None):
             propagate_to_replicas(commands, source_client=client_socket)
             wake_blocked_xread_clients_for_stream(key)
             response = f"${len(entry_id)}\r\n{entry_id}\r\n".encode()
-        elif commands[0] == "XRANGE":
+        elif command_name == "XRANGE":
             key = commands[1]
             if key not in storage or not isinstance(storage[key], RedisStream):
                 response = b"*0\r\n"
@@ -778,7 +846,7 @@ def handle_client(commands, client_socket=None):
                         field_value = fields[i + 1]
                         response += f"${len(field_name)}\r\n{field_name}\r\n".encode()
                         response += f"${len(field_value)}\r\n{field_value}\r\n".encode()
-        elif commands[0] == "XREAD":
+        elif command_name == "XREAD":
             if len(commands) < 4:
                 response = b"-ERR wrong number of arguments for 'xread' command\r\n"
                 return response
@@ -866,14 +934,14 @@ def handle_client(commands, client_socket=None):
                 return None
 
             response = b"*-1\r\n"
-        elif commands[0] == "MULTI":
+        elif command_name == "MULTI":
             response = b"+OK\r\n"
             if client_socket is not None:
                 if client_socket in transaction_queue:
                     response = b"-ERR MULTI calls can not be nested\r\n"
                 else:
                     transaction_queue[client_socket] = []
-        elif commands[0] == "EXEC":
+        elif command_name == "EXEC":
             if client_socket is None:
                 response = b"-ERR EXEC without MULTI\r\n"
             elif client_socket not in transaction_queue:
@@ -888,7 +956,7 @@ def handle_client(commands, client_socket=None):
                     if queued_response is None:
                         queued_response = b"$-1\r\n"
                     response += queued_response
-        elif commands[0] == "DISCARD":
+        elif command_name == "DISCARD":
             if client_socket is None:
                 response = b"-ERR DISCARD without MULTI\r\n"
             elif client_socket not in transaction_queue:
@@ -896,6 +964,8 @@ def handle_client(commands, client_socket=None):
             else:
                 del transaction_queue[client_socket]
                 response = b"+OK\r\n"
+        else:
+            response = b"-ERR unknown command\r\n"
 
     except Exception as e:
         response = f"-ERR {e}\r\n".encode()
@@ -922,6 +992,7 @@ def close_client_socket(s, inputs, outputs, recv_buffer, send_queue):
     send_queue.pop(s, None)
     client_last_write_offset.pop(s, None)
     pending_wait_requests.pop(s, None)
+    remove_client_from_all_subscriptions(s)
     s.close()
 
 
