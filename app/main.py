@@ -158,6 +158,15 @@ class RedisSortedSet:
     def score(self, member: str):
         return self.member_scores.get(member)
 
+    def remove(self, member: str):
+        if member not in self.member_scores:
+            return 0
+
+        score = self.member_scores[member]
+        self._remove_skiplist_node(score, member)
+        del self.member_scores[member]
+        return 1
+
 
 class BlockedXReadRequest:
     def __init__(self, client_socket, resolved_streams, count, deadline):
@@ -1095,14 +1104,18 @@ def handle_client(commands, client_socket=None):
                 response = b"-ERR wrong number of arguments for 'zrem' command\r\n"
             else:
                 key = commands[1]
-                if key not in storage or not isinstance(storage[key], RedisSortedSet):
+                if key not in storage:
                     response = b":0\r\n"
+                elif not isinstance(storage[key], RedisSortedSet):
+                    response = b"-ERR wrong type of value for 'zrem' command\r\n"
                 else:
                     removed_members = 0
                     for member in commands[2:]:
                         removed_members += storage[key].remove(member)
-                    propagate_to_replicas(commands, source_client=client_socket)
-                    append_to_aof(commands)
+
+                    if removed_members > 0:
+                        propagate_to_replicas(commands, source_client=client_socket)
+                        append_to_aof(commands)
                     response = f":{removed_members}\r\n".encode()
         elif command_name == "ZRANK":
             if len(commands) != 3:
