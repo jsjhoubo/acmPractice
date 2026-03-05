@@ -168,6 +168,48 @@ class RedisSortedSet:
         del self.member_scores[member]
         return 1
 
+    def _ordered_members_with_scores(self):
+        current = self.head.forward[0]
+        while current is not None:
+            yield current.member, current.score
+            current = current.forward[0]
+
+    def search_by_radius(self, longitude: float, latitude: float, radius_meters: float):
+        matching_members = []
+        for member, score in self._ordered_members_with_scores():
+            member_longitude, member_latitude = decode_geohash(int(score))
+            distance = calculate_distance(
+                longitude,
+                latitude,
+                member_longitude,
+                member_latitude,
+            )
+            if distance <= radius_meters:
+                matching_members.append(member)
+        return matching_members
+
+    def search_by_box(self, longitude: float, latitude: float, width_meters: float, height_meters: float):
+        if width_meters < 0 or height_meters < 0:
+            return []
+
+        matching_members = []
+        half_width = width_meters / 2.0
+        half_height = height_meters / 2.0
+
+        meters_per_lat_degree = 111320.0
+        meters_per_lon_degree = 111320.0 * max(1e-9, math.cos(math.radians(latitude)))
+
+        for member, score in self._ordered_members_with_scores():
+            member_longitude, member_latitude = decode_geohash(int(score))
+
+            lat_distance = abs(member_latitude - latitude) * meters_per_lat_degree
+            lon_distance = abs(member_longitude - longitude) * meters_per_lon_degree
+
+            if lat_distance <= half_height and lon_distance <= half_width:
+                matching_members.append(member)
+
+        return matching_members
+
 
 class BlockedXReadRequest:
     def __init__(self, client_socket, resolved_streams, count, deadline):
@@ -1524,6 +1566,41 @@ def handle_client(commands, client_socket=None):
                         distance = distance_meters
                         distance_str = str(distance)
                         response = f"${len(distance_str)}\r\n{distance_str}\r\n".encode()
+        elif command_name == "GEOSEARCH":
+            if len(commands) < 4:
+                response = b"-ERR wrong number of arguments for 'geosearch' command\r\n"
+            else:
+                key = commands[1]
+                if key not in storage or not isinstance(storage[key], RedisSortedSet):
+                    response = b"*0\r\n"
+                else:
+                    query_type = commands[2].upper()
+                    if query_type == "BYRADIUS":
+                        try:
+                            longitude = float(commands[3])
+                            latitude = float(commands[4])
+                            radius = float(commands[5])
+                        except ValueError:
+                            response = b"-ERR invalid longitude, latitude, or radius value\r\n"
+                            return response
+                        matching_members = storage[key].search_by_radius(longitude, latitude, radius)
+                    elif query_type == "BYBOX":
+                        try:
+                            longitude = float(commands[3])
+                            latitude = float(commands[4])
+                            width = float(commands[5])
+                            height = float(commands[6])
+                        except ValueError:
+                            response = b"-ERR invalid longitude, latitude, width, or height value\r\n"
+                            return response
+                        matching_members = storage[key].search_by_box(longitude, latitude, width, height)
+                    else:
+                        response = b"-ERR syntax error\r\n"
+                        return response
+
+                    response = f"*{len(matching_members)}\r\n".encode()
+                    for member in matching_members:
+                        response += f"${len(member)}\r\n{member}\r\n".encode()
         elif command_name == "INFO":
             if len(commands) == 1:
                 role_for_info = "slave" if get_replication_role() == "replica" else "master"
