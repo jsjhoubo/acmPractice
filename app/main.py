@@ -1017,6 +1017,10 @@ def maybe_grant_vote(requested_term: int, candidate_id: str):
     return True, "granted"
 
 
+def is_default_user_password_set():
+    return bool(user_passwords.get("default"))
+
+
 def handle_client(commands, client_socket=None):
     response = b""
     try:
@@ -1024,6 +1028,11 @@ def handle_client(commands, client_socket=None):
             return b"-ERR empty command\r\n"
 
         command_name = commands[0].upper()
+        if client_socket in authenticated_users:
+            authenticated_user = authenticated_users[client_socket]
+            if command_name != "AUTH" and authenticated_user is None and is_default_user_password_set():
+                return b"-NOAUTH Authentication required.\r\n"
+
         if (
             get_subscription_count(client_socket) > 0
             and command_name not in subscribed_mode_allowed_commands
@@ -1711,6 +1720,8 @@ def handle_client(commands, client_socket=None):
 
                 stored_password_hash = user_passwords.get(user_name)
                 if stored_password_hash and hashlib.sha256(password.encode()).hexdigest() == stored_password_hash:
+                    if client_socket in authenticated_users:
+                        authenticated_users[client_socket] = user_name
                     response = b"+OK\r\n"
                 else:
                     response = b"-WRONGPASS invalid username-password pair or user is disabled.\r\n"
@@ -2040,6 +2051,7 @@ def close_client_socket(s, inputs, outputs, recv_buffer, send_queue):
     send_queue.pop(s, None)
     client_last_write_offset.pop(s, None)
     pending_wait_requests.pop(s, None)
+    authenticated_users.pop(s, None)
     remove_client_from_all_subscriptions(s)
     s.close()
 
@@ -2472,6 +2484,8 @@ def main():
 
     global user_passwords
     user_passwords = {}
+    global authenticated_users
+    authenticated_users = {}
 
     def flush_send_queue_for_socket(s):
         if s in send_queue and send_queue[s]:
@@ -2630,6 +2644,10 @@ def main():
                     inputs.append(client_socket)
                     recv_buffer[client_socket] = b""
                     send_queue[client_socket] = []
+                    if is_default_user_password_set():
+                        authenticated_users[client_socket] = None
+                    else:
+                        authenticated_users[client_socket] = "default"
                 else:
                     data = s.recv(socket_receive_buffer_size)
                     if data:
