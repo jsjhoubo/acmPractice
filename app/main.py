@@ -1698,6 +1698,22 @@ def handle_client(commands, client_socket=None):
                     response = b"+OK\r\n"
             else:
                 response = b"-ERR syntax error\r\n"
+        elif command_name == "AUTH":
+            if len(commands) not in {2, 3}:
+                response = b"-ERR wrong number of arguments for 'auth' command\r\n"
+            else:
+                if len(commands) == 2:
+                    user_name = "default"
+                    password = commands[1]
+                else:
+                    user_name = commands[1]
+                    password = commands[2]
+
+                stored_password_hash = user_passwords.get(user_name)
+                if stored_password_hash and hashlib.sha256(password.encode()).hexdigest() == stored_password_hash:
+                    response = b"+OK\r\n"
+                else:
+                    response = b"-WRONGPASS invalid username-password pair or user is disabled.\r\n"
         elif command_name == "INFO":
             if len(commands) == 1:
                 role_for_info = "slave" if get_replication_role() == "replica" else "master"
