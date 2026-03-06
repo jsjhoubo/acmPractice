@@ -1635,6 +1635,18 @@ def handle_client(commands, client_socket=None):
         elif command_name == "ACL":
             if len(commands) == 2 and commands[1].upper() == "WHOAMI":
                 response = b"$7\r\ndefault\r\n"
+            elif len(commands) == 3 and commands[1].upper() == "GETUSER":
+                user_name = commands[2]
+                if user_name == "default":
+                    response = encode_resp_array(
+                        [
+                            "flags",
+                             encode_resp_array(["on", "allkeys", "allcommands"]),
+                        ]
+                    )
+                else:
+                    response = b"$-1\r\n"
+
             else:
                 response = b"-ERR syntax error\r\n"
         elif command_name == "INFO":
