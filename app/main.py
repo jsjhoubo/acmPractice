@@ -6,6 +6,8 @@ import os
 import signal
 import random
 import math
+import secrets
+import hashlib
 
 socket_queue_size = 128
 socket_receive_buffer_size = 1024
@@ -23,6 +25,10 @@ subscribed_mode_allowed_commands = {
     "QUIT",
     "RESET",
 }
+
+
+def generate_replication_id():
+    return secrets.token_hex(20)
 
 
 class RedisStream:
@@ -847,6 +853,7 @@ def promote_to_master(reason: str):
     global parent_node_id
     global election_voted_term
     global election_voted_for
+    global master_replid
 
     if upstream_master_host is None:
         return False
@@ -859,6 +866,7 @@ def promote_to_master(reason: str):
     election_voted_term = 0
     election_voted_for = None
     parent_node_id = None
+    master_replid = generate_replication_id()
     last_failover_reason = reason
     last_failover_at = datetime.now()
     print(f"Auto failover promoted replica to master: {reason}")
@@ -1178,18 +1186,38 @@ def handle_client(commands, client_socket=None):
         elif command_name == "PSYNC":
             if len(commands) != 3:
                 response = b"-ERR wrong number of arguments for 'psync' command\r\n"
-            elif commands[1] != "?" or commands[2] != "-1":
-                response = b"-ERR invalid arguments for 'psync' command\r\n"
             else:
-                response = f"+FULLRESYNC {master_replid} {master_repl_offset}\r\n".encode()
-                if client_socket is not None:
-                    replica_connections.add(client_socket)
-                    replica_ack_offsets[client_socket] = 0
-                snapshot_rdb_bytes = build_rdb_snapshot_bytes(storage, expire_times)
-                rdb_header = f"${len(snapshot_rdb_bytes)}\r\n".encode()
-                client_socket.sendall(response)
-                client_socket.sendall(rdb_header + snapshot_rdb_bytes)
-                response = None
+                requested_replid = commands[1]
+                try:
+                    requested_offset = int(commands[2])
+                except ValueError:
+                    response = b"-ERR invalid arguments for 'psync' command\r\n"
+                    return response
+
+                # Without a replication backlog we can only continue when there are
+                # no missing bytes to send.
+                can_continue = (
+                    requested_replid == master_replid
+                    and requested_offset == master_repl_offset
+                )
+
+                if can_continue:
+                    response = b"+CONTINUE\r\n"
+                    if client_socket is not None:
+                        replica_connections.add(client_socket)
+                        replica_ack_offsets[client_socket] = requested_offset
+                elif requested_offset >= -1:
+                    response = f"+FULLRESYNC {master_replid} {master_repl_offset}\r\n".encode()
+                    if client_socket is not None:
+                        replica_connections.add(client_socket)
+                        replica_ack_offsets[client_socket] = 0
+                    snapshot_rdb_bytes = build_rdb_snapshot_bytes(storage, expire_times)
+                    rdb_header = f"${len(snapshot_rdb_bytes)}\r\n".encode()
+                    client_socket.sendall(response)
+                    client_socket.sendall(rdb_header + snapshot_rdb_bytes)
+                    response = None
+                else:
+                    response = b"-ERR invalid arguments for 'psync' command\r\n"
         elif command_name == "ECHO":
             if len(commands) != 2:
                 response = b"-ERR wrong number of arguments for 'echo' command\r\n"
@@ -1638,12 +1666,18 @@ def handle_client(commands, client_socket=None):
             elif len(commands) == 3 and commands[1].upper() == "GETUSER":
                 user_name = commands[2]
                 if user_name == "default":
+                    stored_password = user_passwords.get(user_name)
+                    has_password = bool(stored_password)
+                    password_entries = [stored_password] if stored_password else []
+                    user_flags = ["on", "allkeys", "allchannels", "allcommands"]
+                    if not has_password:
+                        user_flags.insert(1, "nopass")
                     response = encode_resp_array(
                         [
                             "flags",
-                            ["on", "nopass", "allkeys", "allchannels", "allcommands"],
+                            user_flags,
                             "passwords",
-                            [],
+                            password_entries,
                             "commands",
                             "+@all",
                             "keys",
@@ -1656,7 +1690,12 @@ def handle_client(commands, client_socket=None):
                     )
                 else:
                     response = b"$-1\r\n"
-
+            elif len(commands) == 4 and commands[1].upper() == "SETUSER":
+                user_name = commands[2]
+                if commands[3].startswith(">"):
+                    password = commands[3][1:]
+                    user_passwords[user_name] = hashlib.sha256(password.encode()).hexdigest()
+                    response = b"+OK\r\n"
             else:
                 response = b"-ERR syntax error\r\n"
         elif command_name == "INFO":
@@ -2314,7 +2353,7 @@ def main():
     global last_election_votes
     last_election_votes = 0
     global master_replid
-    master_replid = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb"
+    master_replid = generate_replication_id()
     global master_repl_offset
     master_repl_offset = 0
     global replica_repl_offset
@@ -2402,6 +2441,8 @@ def main():
             return
         upstream_connected = True
         parent_node_id = upstream_node_id
+        if upstream_node_id is not None:
+            master_replid = upstream_node_id
         last_master_activity_at = datetime.now()
         master_connection.setblocking(False)
         inputs.append(master_connection)
@@ -2412,6 +2453,9 @@ def main():
     recv_buffer = {}
     global send_queue
     send_queue = {}
+
+    global user_passwords
+    user_passwords = {}
 
     def flush_send_queue_for_socket(s):
         if s in send_queue and send_queue[s]:
@@ -2465,6 +2509,7 @@ def main():
         global parent_node_id
         global pending_replicaof_target
         global last_master_activity_at
+        global master_replid
 
         if pending_replicaof_target is None:
             return
@@ -2501,6 +2546,8 @@ def main():
         send_queue[master_connection] = []
         upstream_connected = True
         parent_node_id = new_parent_node_id
+        if new_parent_node_id is not None:
+            master_replid = new_parent_node_id
         last_master_activity_at = datetime.now()
         process_master_input_buffer(master_connection)
 
