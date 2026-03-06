@@ -1641,7 +1641,17 @@ def handle_client(commands, client_socket=None):
                     response = encode_resp_array(
                         [
                             "flags",
-                             encode_resp_array(["on", "allkeys", "allcommands"]),
+                            ["on", "nopass", "allkeys", "allchannels", "allcommands"],
+                            "passwords",
+                            [],
+                            "commands",
+                            "+@all",
+                            "keys",
+                            "~*",
+                            "channels",
+                            "&*",
+                            "selectors",
+                            [],
                         ]
                     )
                 else:
@@ -1979,11 +1989,24 @@ def close_client_socket(s, inputs, outputs, recv_buffer, send_queue):
     s.close()
 
 
+def encode_resp_value(value):
+    if isinstance(value, bytes):
+        return f"${len(value)}\r\n".encode() + value + b"\r\n"
+    if isinstance(value, str):
+        encoded_value = value.encode()
+        return f"${len(encoded_value)}\r\n".encode() + encoded_value + b"\r\n"
+    if value is None:
+        return b"$-1\r\n"
+    if isinstance(value, (list, tuple)):
+        return encode_resp_array(value)
+
+    raise TypeError(f"unsupported RESP type: {type(value).__name__}")
+
+
 def encode_resp_array(parts):
     encoded = f"*{len(parts)}\r\n".encode()
     for part in parts:
-        encoded_part = part.encode()
-        encoded += f"${len(encoded_part)}\r\n".encode() + encoded_part + b"\r\n"
+        encoded += encode_resp_value(part)
     return encoded
 
 
