@@ -1,0 +1,27 @@
+{
+  "git.enabled": true,
+  "git.path": "C:/Program Files/Git/cmd/git.exe",
+  "github.copilot.enable": {
+    "*": false,
+    "plaintext": false,
+    "markdown": false,
+    "scminput": false
+  },
+  "github.copilot.inlineSuggest.enable": false,
+  "editor.inlineSuggest.enabled": false,
+  "editor.suggest.localityBonus": true,
+  "[cpp]": {
+    "editor.suggestOnTriggerCharacters": true,
+    "editor.quickSuggestions": {
+      "other": false,
+      "comments": false,
+      "strings": false
+    },
+    "editor.wordBasedSuggestions": "off",
+    "editor.suggest.matchOnWordStartOnly": true,
+    "editor.suggest.showKeywords": false,
+    "editor.suggest.showSnippets": false,
+    "editor.suggest.showWords": false,
+    "editor.snippetSuggestions": "none"
+  }
+}

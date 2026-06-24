@@ -1,0 +1,20 @@
+[project]
+name = "python-app"
+version = "0.1.0"
+description = "Simple Python starter project"
+readme = "README.md"
+requires-python = ">=3.10"
+
+authors = [
+  { name = "Your Name" }
+]
+
+dependencies = []
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
