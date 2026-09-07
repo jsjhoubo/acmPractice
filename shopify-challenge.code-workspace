@@ -1,0 +1,13 @@
+{
+  "folders": [
+    {
+      "path": "."
+    },
+    {
+      "path": "../technical-challenge-Bo-Hou"
+    }
+  ],
+  "settings": {
+    "git.path": "C:/Program Files/Git/cmd/git.exe"
+  }
+}

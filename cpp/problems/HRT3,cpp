@@ -1,0 +1,29 @@
+#include <cstdio>
+#include <iostream>
+#include <string>
+#include <algorithm>
+using namespace std;
+
+string itoa(int x) {
+    if (x ==0) {
+        return "0";
+    }
+    string ret;
+    long long y =x;
+    if (x<0) {
+        ret = "-";
+        y =-1 *y;
+    }
+    string buf;
+    while (y >0) {
+        buf = buf + (char)(y%10 +'0');
+        y =y/10;
+    }
+    reverse(buf.begin(),buf.end());
+    ret =ret + buf;
+    return ret;
+}
+
+int main() {
+    return 0;
+}
